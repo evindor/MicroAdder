@@ -40,6 +40,46 @@ def get_lr(step: int, args) -> float:
     return min_lr + (args.lr - min_lr) * cosine
 
 
+def effective_weight_decay(base_wd: float, val_exact: float, tok_acc: float, args) -> float:
+    """Adaptive weight decay: drop WD when grokking signals appear.
+
+    Uses val_exact as the primary signal (rising val_exact = circuit found)
+    with tok_acc as a secondary gate (must be above threshold too).
+
+    Two-stage drop:
+      - Stage 1 (onset): val_exact > wd_drop_exact AND tok_acc > wd_drop_tok_acc
+        → multiply WD by wd_drop_factor (e.g. 0.1)
+      - Stage 2 (locked): val_exact > wd_drop_exact_final
+        → multiply WD by wd_drop_factor² (e.g. 0.01)
+    """
+    if not args.wd_adaptive:
+        return base_wd
+
+    # Stage 2: deep drop once val_exact is solidly rising
+    if val_exact >= args.wd_drop_exact_final and tok_acc >= args.wd_drop_tok_acc:
+        return base_wd * args.wd_drop_factor * args.wd_drop_factor
+
+    # Stage 1: first drop when grokking onset detected
+    if val_exact >= args.wd_drop_exact and tok_acc >= args.wd_drop_tok_acc:
+        return base_wd * args.wd_drop_factor
+
+    return base_wd
+
+
+def smooth_weight_decay(base_wd: float, step: int, onset_step: int, alpha: float, floor: float) -> float:
+    """Smooth exponential WD decay after grokking onset (ratcheted — never goes back up).
+
+    wd = base_wd * exp(-alpha * (step - onset_step)), clamped to floor.
+    """
+    decay = math.exp(-alpha * (step - onset_step))
+    return max(base_wd * decay, floor)
+
+
+def check_wd_onset(val_exact: float, tok_acc: float, args) -> bool:
+    """Check if grokking onset condition is met (shared by discrete and smooth WD)."""
+    return val_exact >= args.wd_drop_exact and tok_acc >= args.wd_drop_tok_acc
+
+
 def effective_carry_mix(base_mix: float, step: int, tok_acc: float, args) -> float:
     """Fade carry_mix to 0 based on token accuracy and step count.
 
@@ -58,6 +98,98 @@ def effective_carry_mix(base_mix: float, step: int, tok_acc: float, args) -> flo
     # Linear fade
     span = args.carry_mix_tok_acc_zero - args.carry_mix_tok_acc_fade
     return base_mix * (args.carry_mix_tok_acc_zero - tok_acc) / span
+
+
+# ── Autoregressive training loss ──────────────────────────────────────────
+
+def ar_training_loss(
+    model: MicroAdder,
+    batch_input: torch.Tensor,
+    batch_target: torch.Tensor,
+) -> torch.Tensor:
+    """Compute cross-entropy loss using autoregressive (own-prediction) feeding.
+
+    Instead of teacher forcing (feeding ground truth at every position),
+    we feed the model's own predictions for answer positions. This eliminates
+    the train/inference distribution mismatch.
+
+    Gradients flow through the cross-entropy loss at each step. The fed-back
+    tokens are detached (argmax is non-differentiable), so each step's gradient
+    is independent — but the *input distribution* each step sees reflects the
+    model's actual behavior, not teacher-forced ground truth.
+
+    Args:
+        model: the MicroAdder model
+        batch_input: (B, 33) token ids — full teacher-forced input sequence
+        batch_target: (B, 33) target ids — with -100 on prompt positions
+    """
+    B, T = batch_input.shape
+    device = batch_input.device
+    prompt_len = PROMPT_LEN  # 22: X(10) + PLUS(1) + Y(10) + EQ(1)
+
+    # Collect predicted tokens for AR feeding (detached from graph).
+    # Start with a copy of the teacher-forced input; overwrite answer positions
+    # as we go with our own predictions.
+    ar_tokens = batch_input.clone()
+
+    # Collect per-position losses
+    total_loss = torch.tensor(0.0, device=device)
+    n_tokens = 0
+
+    # target[t] = ground truth for position t+1 in the full sequence.
+    # target[t] is -100 for t < PROMPT_LEN - 1 (prompt positions).
+    # First non-masked target is target[PROMPT_LEN - 1] = Z_0.
+    #
+    # At each step t, we run the model on ar_tokens[:, :t+1], read
+    # logits[:, t] (prediction for token at position t+1), compute loss
+    # against target[t], then set ar_tokens[:, t+1] = argmax(logits[:, t]).
+
+    for t in range(prompt_len - 1, T):
+        # Clone the prefix so in-place edits to ar_tokens don't invalidate
+        # the autograd graph from this forward pass.
+        step_input = ar_tokens[:, :t + 1].clone()
+        logits, _ = model(step_input)
+
+        tgt = batch_target[:, t]  # (B,)
+        mask = tgt != -100
+        if mask.any():
+            pos_logits = logits[:, t]  # (B, vocab_size)
+            loss_t = F.cross_entropy(pos_logits[mask], tgt[mask], reduction='sum')
+            total_loss = total_loss + loss_t
+            n_tokens += mask.sum().item()
+
+        # Feed back our own prediction for the next position's input
+        if t + 1 < T:
+            with torch.no_grad():
+                pred_tok = logits[:, t].argmax(dim=-1)  # (B,)
+                ar_tokens[:, t + 1] = pred_tok
+
+    if n_tokens > 0:
+        total_loss = total_loss / n_tokens
+    return total_loss
+
+
+# ── Grokfast gradient filter ───────────────────────────────────────────
+
+def gradfilter_ema(
+    model: torch.nn.Module,
+    grads: dict | None = None,
+    alpha: float = 0.98,
+    lamb: float = 2.0,
+) -> dict:
+    """Grokfast EMA gradient filter (Lee et al., 2024).
+
+    Maintains an EMA of gradients and amplifies slow-varying components.
+    Call after loss.backward(), before optimizer.step().
+    """
+    if grads is None:
+        grads = {n: p.grad.data.detach().clone() for n, p in model.named_parameters() if p.requires_grad and p.grad is not None}
+    else:
+        for n, p in model.named_parameters():
+            if p.requires_grad and p.grad is not None:
+                grads[n] = grads[n] * alpha + p.grad.data.detach() * (1 - alpha)
+                p.grad.data += grads[n] * lamb
+    return grads
 
 
 # ── Evaluation ─────────────────────────────────────────────────────────────
@@ -383,6 +515,10 @@ def train(model, optimizer, curriculum, args, run_dir, device):
     rng_data = random.Random(args.seed)
     best_exact = -1.0
     last_tok_acc = 0.0
+    last_val_exact = 0.0
+    wd_stage = 0  # 0=full, 1=first drop, 2=second drop
+    wd_onset_step = None  # for --wd-smooth: step when grokking onset detected
+    grokfast_grads = None  # for --grokfast: EMA state
     t0 = time.time()
     running_loss = 0.0
     log_interval = min(args.eval_interval, 1000)
@@ -425,16 +561,33 @@ def train(model, optimizer, curriculum, args, run_dir, device):
             args.batch_size, min_d, max_d, rng_data, device,
             carry_mix=carry_mix,
         )
-        _, loss = model(batch_input, batch_target)
+        if args.ar_loss:
+            loss = ar_training_loss(model, batch_input, batch_target)
+        else:
+            _, loss = model(batch_input, batch_target)
         loss.backward()
+
+        # Grokfast: amplify slow-varying gradient components
+        if args.grokfast:
+            grokfast_grads = gradfilter_ema(
+                model, grokfast_grads,
+                alpha=args.grokfast_alpha, lamb=args.grokfast_lamb,
+            )
 
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-        # Update LR
+        # Update LR + weight decay
         lr = get_lr(step, args)
+        if args.wd_smooth and wd_onset_step is not None:
+            wd_floor = args.weight_decay * args.wd_drop_factor * args.wd_drop_factor
+            wd = smooth_weight_decay(args.weight_decay, step, wd_onset_step,
+                                     args.wd_smooth_alpha, wd_floor)
+        else:
+            wd = effective_weight_decay(args.weight_decay, last_val_exact, last_tok_acc, args)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
+            pg["weight_decay"] = wd
 
         optimizer.step()
         optimizer.zero_grad()
@@ -453,11 +606,32 @@ def train(model, optimizer, curriculum, args, run_dir, device):
         if step > 0 and step % args.eval_interval == 0:
             metrics = evaluate(model, args.eval_samples, seed=2025, device=device)
             last_tok_acc = metrics["token_accuracy"]
+            last_val_exact = metrics["exact_match"]
             elapsed = time.time() - t0
             carry_str = f" | carry_mix {carry_mix:.3f}" if args.carry_mix > 0 else ""
+            wd_str = f" | wd {wd:.2e}" if (args.wd_adaptive or args.wd_smooth) else ""
             log(f"  EVAL step {step:>7d} | exact {metrics['exact_match']:.6f} | "
-                f"tok_acc {metrics['token_accuracy']:.4f}{carry_str} | {elapsed:.0f}s")
+                f"tok_acc {metrics['token_accuracy']:.4f}{carry_str}{wd_str} | {elapsed:.0f}s")
             log_metrics(step, loss.item(), lr, metrics, t0, min_d, max_d)
+
+            # Log WD transitions
+            if args.wd_smooth:
+                if wd_onset_step is None and check_wd_onset(last_val_exact, last_tok_acc, args):
+                    wd_onset_step = step
+                    log(f"  [wd-smooth] ONSET at step {step}: beginning exponential decay "
+                        f"(alpha={args.wd_smooth_alpha}, val_exact={last_val_exact:.4f}, "
+                        f"tok_acc={last_tok_acc:.4f})")
+            elif args.wd_adaptive:
+                new_wd = effective_weight_decay(args.weight_decay, last_val_exact, last_tok_acc, args)
+                new_stage = 0
+                if new_wd <= args.weight_decay * args.wd_drop_factor * args.wd_drop_factor * 1.01:
+                    new_stage = 2
+                elif new_wd <= args.weight_decay * args.wd_drop_factor * 1.01:
+                    new_stage = 1
+                if new_stage > wd_stage:
+                    wd_stage = new_stage
+                    log(f"  [wd-adaptive] STAGE {wd_stage}: wd {args.weight_decay:.2e} -> {new_wd:.2e} "
+                        f"(val_exact={last_val_exact:.4f}, tok_acc={last_tok_acc:.4f})")
 
             # Save last
             _save_checkpoint(model, optimizer, step, metrics, args,
@@ -507,14 +681,26 @@ def parse_args():
     p.add_argument("--ffn-dim", type=int, default=2)
     p.add_argument("--ffn-bias", action="store_true", default=True)
     p.add_argument("--no-ffn-bias", dest="ffn_bias", action="store_false")
-    p.add_argument("--pos-mode", default="learned", choices=["learned", "spiral_correct"])
+    p.add_argument("--pos-mode", default="learned", choices=["learned", "spiral_correct", "zero"])
     p.add_argument("--pos-correction-mode", default="full", choices=["full", "linear"],
                    help="Position correction: 'full' (10 params) or 'linear' (2 params)")
     p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos"],
                    help="Freeze special positions to zero: 'eos' saves 3p, 'plus_eos' saves 6p")
+    p.add_argument("--alibi", action="store_true", default=False,
+                   help="Add ALiBi attention bias with learned per-head slopes")
+    p.add_argument("--qk-source", default="pos", choices=["pos", "tok"],
+                   help="Q,K input: 'pos' (position subspace) or 'tok' (token subspace)")
     p.add_argument("--tie-qk", action="store_true", default=False)
     p.add_argument("--attn-out-rank", type=int, default=0)
+    p.add_argument("--num-kv-heads", type=int, default=0,
+                   help="Number of KV heads for GQA (0 = same as n_heads = standard MHA)")
+    p.add_argument("--q-phase", action="store_true", default=False,
+                   help="Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)")
     p.add_argument("--share-layers", action="store_true", default=False)
+    p.add_argument("--norm-mode", default="full", choices=["full", "shared", "fixed", "no_ln2"],
+                   help="RMSNorm mode: full (18p), shared (6p), fixed (0p), no_ln2 (12p)")
+    p.add_argument("--freeze-pad", action="store_true", default=False,
+                   help="Freeze PAD token embedding to zero (saves tok_dim params)")
     p.add_argument("--token-init", default="spiral", choices=["spiral", "normal"])
 
     # Training
@@ -524,7 +710,29 @@ def parse_args():
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--warmup-steps", type=int, default=1000)
     p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--wd-adaptive", action="store_true", default=False,
+                   help="Enable adaptive weight decay (drop WD when grokking detected)")
+    p.add_argument("--wd-drop-exact", type=float, default=0.02,
+                   help="Val exact match threshold for first WD drop (stage 1)")
+    p.add_argument("--wd-drop-exact-final", type=float, default=0.20,
+                   help="Val exact match threshold for second WD drop (stage 2)")
+    p.add_argument("--wd-drop-tok-acc", type=float, default=0.70,
+                   help="Token accuracy gate: WD drop only fires if tok_acc also above this")
+    p.add_argument("--wd-drop-factor", type=float, default=0.1,
+                   help="WD multiplier per stage (stage1=factor, stage2=factor²)")
+    p.add_argument("--wd-smooth", action="store_true", default=False,
+                   help="Smooth exponential WD decay after grokking onset (ratcheted)")
+    p.add_argument("--wd-smooth-alpha", type=float, default=0.0001,
+                   help="Exponential decay rate for smooth WD (reaches 0.1x at ~23K steps)")
     p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--grokfast", action="store_true", default=False,
+                   help="Enable Grokfast EMA gradient filter (amplify slow gradient components)")
+    p.add_argument("--grokfast-alpha", type=float, default=0.98,
+                   help="Grokfast EMA decay rate (higher = longer memory)")
+    p.add_argument("--grokfast-lamb", type=float, default=2.0,
+                   help="Grokfast amplification factor for slow gradient components")
+    p.add_argument("--ar-loss", action="store_true", default=False,
+                   help="Use autoregressive training loss (feed own predictions, not teacher forcing)")
 
     # Curriculum
     p.add_argument("--curriculum", default="1-3:2000,1-6:5000,1-10:rest")
@@ -582,9 +790,15 @@ def main():
         pos_mode=args.pos_mode,
         pos_correction_mode=args.pos_correction_mode,
         freeze_special=args.freeze_special,
+        alibi=args.alibi,
+        qk_source=args.qk_source,
         tie_qk=args.tie_qk,
         attn_out_rank=args.attn_out_rank,
+        num_kv_heads=args.num_kv_heads,
+        q_phase=args.q_phase,
         share_layers=args.share_layers,
+        norm_mode=args.norm_mode,
+        freeze_pad=args.freeze_pad,
         token_init=args.token_init,
     )
 
@@ -610,6 +824,18 @@ def main():
     print(f"Curriculum: {curriculum}")
     if args.carry_mix > 0:
         print(f"Carry-focused mix: {args.carry_mix:.0%}")
+    if args.ar_loss:
+        print("Training loss: AUTOREGRESSIVE (feed own predictions)")
+    if args.wd_smooth:
+        print(f"Smooth WD: exponential decay (alpha={args.wd_smooth_alpha}) after "
+              f"val_exact>{args.wd_drop_exact} & tok_acc>{args.wd_drop_tok_acc}, "
+              f"floor={args.weight_decay * args.wd_drop_factor**2:.2e}")
+    elif args.wd_adaptive:
+        print(f"Adaptive WD: drop {args.wd_drop_factor}x at val_exact>{args.wd_drop_exact}, "
+              f"{args.wd_drop_factor}²x at val_exact>{args.wd_drop_exact_final}, "
+              f"tok_acc gate>{args.wd_drop_tok_acc}")
+    if args.grokfast:
+        print(f"Grokfast: EMA alpha={args.grokfast_alpha}, lambda={args.grokfast_lamb}")
     if args.jiggle:
         print(f"Jiggle: every {args.jiggle_interval} steps, "
               f"{args.jiggle_candidates} candidates, "
