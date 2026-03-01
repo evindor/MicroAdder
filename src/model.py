@@ -50,6 +50,7 @@ class ModelConfig:
     share_layers: bool = False      # Universal transformer style
     norm_mode: str = "full"         # "full" (18p) | "shared" (6p) | "fixed" (0p) | "no_ln2" (12p)
     freeze_pad: bool = False        # Freeze PAD token embedding to zero (saves tok_dim params)
+    softmax1: bool = False          # Use softmax1 (add 1 to denominator, allows attn sum < 1)
 
     token_init: str = "spiral"      # "spiral" | "normal"
     vocab_size: int = VOCAB_SIZE
@@ -108,6 +109,7 @@ class SplitAttention(nn.Module):
         self.tie_qk = cfg.tie_qk
         self.use_alibi = cfg.alibi
         self.use_q_phase = cfg.q_phase
+        self.use_softmax1 = cfg.softmax1
 
         # GQA: num_kv_heads <= n_heads; 0 means same as n_heads (standard MHA)
         self.num_kv_heads = cfg.num_kv_heads if cfg.num_kv_heads > 0 else cfg.n_heads
@@ -209,7 +211,12 @@ class SplitAttention(nn.Module):
             att = att + alibi_bias
 
         att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
+        if self.use_softmax1:
+            # Softmax1: exp(x) / (1 + sum(exp(x))), allows attention sum < 1
+            att_exp = torch.exp(att - att.max(dim=-1, keepdim=True).values)  # numerical stability
+            att = att_exp / (1.0 + att_exp.sum(dim=-1, keepdim=True))
+        else:
+            att = F.softmax(att, dim=-1)
 
         out = (att @ v).transpose(1, 2).contiguous().view(B, T, self.inner_dim)
         return self.out_proj(out)
@@ -334,9 +341,12 @@ class MicroAdder(nn.Module):
             self.digit_pos = nn.Parameter(torch.zeros(MAX_DIGITS, cfg.pos_dim))
         elif cfg.pos_mode == "spiral_correct":
             # Parametric spiral (4 params)
+            # pos_dim>=3: amp*cos, amp*sin, slope*i+offset (circle + linear ramp)
+            # pos_dim==2: amp*cos(+phase), slope*sin(+offset) (ellipse with independent phases)
             self.spiral_amp = nn.Parameter(torch.tensor(1.0))
             self.spiral_phase = nn.Parameter(torch.tensor(0.0))
-            self.spiral_slope = nn.Parameter(torch.tensor(1.0 / max(1, MAX_DIGITS - 1)))
+            slope_init = 1.0 if cfg.pos_dim == 2 else 1.0 / max(1, MAX_DIGITS - 1)
+            self.spiral_slope = nn.Parameter(torch.tensor(slope_init))
             self.spiral_offset = nn.Parameter(torch.tensor(0.0))
             # Per-position scale correction
             if cfg.pos_correction_mode == "full":
@@ -398,7 +408,12 @@ class MicroAdder(nn.Module):
         if cfg.pos_dim > 0:
             base[:, 0] = self.spiral_amp * torch.cos(angle)
         if cfg.pos_dim > 1:
-            base[:, 1] = self.spiral_amp * torch.sin(angle)
+            if cfg.pos_dim == 2:
+                # Ellipse mode: independent amp/phase per axis (all 4 spiral params used)
+                angle2 = 2.0 * math.pi * idx / float(MAX_DIGITS) + self.spiral_offset
+                base[:, 1] = self.spiral_slope * torch.sin(angle2)
+            else:
+                base[:, 1] = self.spiral_amp * torch.sin(angle)
         if cfg.pos_dim > 2:
             base[:, 2] = self.spiral_slope * idx + self.spiral_offset
         # Apply correction scaling

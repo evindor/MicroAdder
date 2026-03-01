@@ -43,22 +43,31 @@ PAD_TOKEN = 13
 
 # -- Position index map (shared XYZ: X[i]=Y[i]=Z[i]) --
 
+
 def _build_pos_map():
     sources, indices = [], []
-    for i in range(10):                          # X_0..X_9
-        sources.append(0); indices.append(i)
-    sources.append(2); indices.append(0)         # PLUS
-    for i in range(10):                          # Y_0..Y_9
-        sources.append(0); indices.append(i)
-    sources.append(2); indices.append(1)         # EQUALS
-    for i in range(10):                          # Z_0..Z_9
-        sources.append(0); indices.append(i)
-    sources.append(1); indices.append(0)         # Z_10 (carry)
-    sources.append(2); indices.append(2)         # EOS
+    for i in range(10):  # X_0..X_9
+        sources.append(0)
+        indices.append(i)
+    sources.append(2)
+    indices.append(0)  # PLUS
+    for i in range(10):  # Y_0..Y_9
+        sources.append(0)
+        indices.append(i)
+    sources.append(2)
+    indices.append(1)  # EQUALS
+    for i in range(10):  # Z_0..Z_9
+        sources.append(0)
+        indices.append(i)
+    sources.append(1)
+    indices.append(0)  # Z_10 (carry)
+    sources.append(2)
+    indices.append(2)  # EOS
     return torch.tensor(sources), torch.tensor(indices)
 
 
 # -- Modules --
+
 
 class RMSNorm(nn.Module):
     def __init__(self, d, eps=1e-5):
@@ -72,6 +81,7 @@ class RMSNorm(nn.Module):
 
 class LowRankLinear(nn.Module):
     """y = x @ A @ B (rank-2 factorization)."""
+
     def __init__(self, in_features, out_features, rank):
         super().__init__()
         self.A = nn.Parameter(torch.empty(in_features, rank))
@@ -136,7 +146,9 @@ class MicroAdder(nn.Module):
         )
 
     def _get_digit_positions(self):
-        idx = torch.arange(MAX_DIGITS, device=self.spiral_amp.device, dtype=self.spiral_amp.dtype)
+        idx = torch.arange(
+            MAX_DIGITS, device=self.spiral_amp.device, dtype=self.spiral_amp.dtype
+        )
         angle = 2.0 * math.pi * idx / float(MAX_DIGITS) + self.spiral_phase
         base = torch.zeros(MAX_DIGITS, POS_DIM, device=idx.device)
         base[:, 0] = self.spiral_amp * torch.cos(angle)
@@ -165,7 +177,7 @@ class MicroAdder(nn.Module):
         sin_a = self.q_phase_angle.sin()
         # Rotate pair (d0, d1); d2 untouched (head_dim=3, 1 pair)
         q_rot = q.clone()
-        c = cos_a[None, :, None]   # (1, n_heads, 1)
+        c = cos_a[None, :, None]  # (1, n_heads, 1)
         s = sin_a[None, :, None]
         q0 = q[:, :, :, 0]
         q1 = q[:, :, :, 1]
@@ -203,7 +215,9 @@ class MicroAdder(nn.Module):
     def generate(self, prompt):
         self.eval()
         B, T_prompt = prompt.shape
-        full_seq = torch.zeros(B, T_prompt + ANSWER_LEN + 1, dtype=torch.long, device=prompt.device)
+        full_seq = torch.zeros(
+            B, T_prompt + ANSWER_LEN + 1, dtype=torch.long, device=prompt.device
+        )
         full_seq[:, :T_prompt] = prompt
         for step in range(ANSWER_LEN + 1):
             T = T_prompt + step
@@ -214,11 +228,14 @@ class MicroAdder(nn.Module):
 
 # -- Submission interface --
 
+
 def build_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MicroAdder()
 
-    ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint_170p.pt")
+    ckpt_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "checkpoint_170p.pt"
+    )
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     # Remap keys from training checkpoint format to submission model format
@@ -249,27 +266,17 @@ def build_model():
     model.eval()
 
     seen = set()
-    n_params = sum(p.numel() for p in model.parameters() if id(p) not in seen and not seen.add(id(p)))
+    n_params = sum(
+        p.numel()
+        for p in model.parameters()
+        if id(p) not in seen and not seen.add(id(p))
+    )
 
     metadata = {
         "name": "MicroAdder 170p",
         "author": "Arseniy Zarechnev",
         "params": n_params,
         "architecture": "1L decoder, d=6 (2 tok + 4 pos), 2h, hd=3, ff=2, rank-2 out_proj, tied Q/K + q-phase, RMSNorm, tied output",
-        "tricks": [
-            "Split-subspace attention: Q,K from pos dims; V from tok dims",
-            "Tied Q/K with per-head phase rotation (2 params for asymmetry, replaces 18p K projection)",
-            "tok_dim=2, pos_dim=4 reshape (saves 17p vs tok_dim=3, pos_dim=3)",
-            "Spiral+correction positional encoding (4 spiral + 2 linear correction = 6 params)",
-            "Rank-2 attention output projection (24 params vs 36 full-rank)",
-            "Frozen EOS special position (zero, not counted)",
-            "Shared XYZ positions: X[i]=Y[i]=Z[i]",
-            "Tied output head: Linear(6->2) @ tok_emb.T",
-            "RMSNorm (no bias)",
-            "Carry-focused curriculum: 30% carry-heavy examples",
-            "Adaptive weight decay: drops WD at grokking onset",
-            "LSB-first digit ordering",
-        ],
     }
     return model, metadata
 
@@ -289,5 +296,5 @@ def add(model, a: int, b: int) -> int:
     for i, tok in enumerate(generated[0].tolist()):
         if tok >= 10:
             break
-        result += tok * (10 ** i)
+        result += tok * (10**i)
     return result

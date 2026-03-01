@@ -519,6 +519,7 @@ def train(model, optimizer, curriculum, args, run_dir, device):
     wd_stage = 0  # 0=full, 1=first drop, 2=second drop
     wd_onset_step = None  # for --wd-smooth: step when grokking onset detected
     grokfast_grads = None  # for --grokfast: EMA state
+    perfect_since_step = None  # for early stopping: step when val_exact first hit 1.0
     t0 = time.time()
     running_loss = 0.0
     log_interval = min(args.eval_interval, 1000)
@@ -644,6 +645,19 @@ def train(model, optimizer, curriculum, args, run_dir, device):
                                  ckpt_dir / "best.pt")
                 log(f"  NEW BEST: {best_exact:.6f}")
 
+            # Early stopping: stop if val_exact == 1.0 for 10K steps
+            if metrics["exact_match"] >= 1.0 - 1e-9:
+                if perfect_since_step is None:
+                    perfect_since_step = step
+                    log(f"  [early-stop] val_exact=1.0 first seen at step {step}")
+                elif step - perfect_since_step >= 10_000:
+                    log(f"  [early-stop] val_exact=1.0 held for {step - perfect_since_step} steps. Stopping.")
+                    break
+            else:
+                if perfect_since_step is not None:
+                    log(f"  [early-stop] val_exact dropped below 1.0, resetting (was perfect since step {perfect_since_step})")
+                perfect_since_step = None
+
     # Final eval
     final = evaluate(model, args.eval_samples, seed=2025, device=device)
     log(f"FINAL | exact {final['exact_match']:.6f} | tok_acc {final['token_accuracy']:.4f}")
@@ -701,6 +715,8 @@ def parse_args():
                    help="RMSNorm mode: full (18p), shared (6p), fixed (0p), no_ln2 (12p)")
     p.add_argument("--freeze-pad", action="store_true", default=False,
                    help="Freeze PAD token embedding to zero (saves tok_dim params)")
+    p.add_argument("--softmax1", action="store_true", default=False,
+                   help="Use softmax1 (add 1 to denominator, allows attention sum < 1)")
     p.add_argument("--token-init", default="spiral", choices=["spiral", "normal"])
 
     # Training
@@ -799,12 +815,17 @@ def main():
         share_layers=args.share_layers,
         norm_mode=args.norm_mode,
         freeze_pad=args.freeze_pad,
+        softmax1=args.softmax1,
         token_init=args.token_init,
     )
 
     model = MicroAdder(cfg).to(device)
     n_params = count_parameters(model)
+    inner_dim = cfg.n_heads * cfg.head_dim
     print(f"Model: {n_params} parameters")
+    if inner_dim != cfg.d_model:
+        print(f"  ** Decoupled: d_model={cfg.d_model}, inner_dim={inner_dim} "
+              f"(n_heads={cfg.n_heads} x head_dim={cfg.head_dim})")
     for name, count in parameter_breakdown(model).items():
         print(f"  {name}: {count}")
 

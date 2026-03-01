@@ -1,0 +1,9 @@
+nohup: ignoring input
+=== d_model=5, 1h, 141p sweep — Sun Mar  1 03:41:22 EET 2026 ===
+Seeds: 42 69 420 12345 1337 1995 2026 707 777 10 666 999
+Parallel: 3
+
+--- Batch: 42 69 420 ---
+[03:41:22] Starting seed 42 -> results/runs/sub100_exp3_d5h1_141p_wd10_s42.log
+[03:41:22] Starting seed 69 -> results/runs/sub100_exp3_d5h1_141p_wd10_s69.log
+[03:41:22] Starting seed 420 -> results/runs/sub100_exp3_d5h1_141p_wd10_s420.log
