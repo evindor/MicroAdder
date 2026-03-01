@@ -24,7 +24,7 @@ from .model import ModelConfig, MicroAdder, count_parameters, parameter_breakdow
 from .data import (
     VOCAB_SIZE, PROMPT_LEN, ANSWER_LEN, SEQ_LEN,
     sample_batch, parse_curriculum, get_digit_range, make_example, decode_answer,
-    EOS, MAX_DIGITS,
+    EOS, MAX_DIGITS, get_token_ids,
 )
 
 
@@ -201,6 +201,7 @@ def evaluate(
     seed: int,
     device: torch.device,
     batch_size: int = 512,
+    vocab_size: int = 14,
 ) -> dict:
     """Teacher-forced evaluation: exact match + token accuracy."""
     model.eval()
@@ -216,7 +217,7 @@ def evaluate(
         for _ in range(bs):
             a = rng.randint(0, 10**10 - 1)
             b = rng.randint(0, 10**10 - 1)
-            inp, tgt = make_example(a, b)
+            inp, tgt = make_example(a, b, vocab_size=vocab_size)
             inputs.append(inp)
             targets.append(tgt)
 
@@ -247,6 +248,7 @@ def evaluate_autoregressive(
     n_samples: int,
     seed: int,
     device: torch.device,
+    vocab_size: int = 14,
 ) -> dict:
     """Autoregressive evaluation (accurate but slower)."""
     model.eval()
@@ -256,10 +258,10 @@ def evaluate_autoregressive(
     for i in range(n_samples):
         a = rng.randint(0, 10**10 - 1)
         b = rng.randint(0, 10**10 - 1)
-        inp, _ = make_example(a, b)
+        inp, _ = make_example(a, b, vocab_size=vocab_size)
         prompt = torch.tensor([inp[:PROMPT_LEN]], dtype=torch.long, device=device)
         generated = model.generate(prompt, max_new_tokens=ANSWER_LEN + 1)
-        predicted = decode_answer(generated[0].tolist())
+        predicted = decode_answer(generated[0].tolist(), vocab_size=vocab_size)
         if predicted == a + b:
             correct += 1
         if (i + 1) % 500 == 0:
@@ -340,6 +342,7 @@ def _settle_and_track(
         batch_input, batch_target = sample_batch(
             args.batch_size, min_d, max_d, data_rng, device,
             carry_mix=args.carry_mix,
+            vocab_size=model.cfg.vocab_size,
         )
         _, loss = model(batch_input, batch_target)
         loss.backward()
@@ -350,7 +353,8 @@ def _settle_and_track(
 
         # Periodic eval (always include the final step)
         if (s + 1) % eval_interval == 0 or s == settle_steps - 1:
-            metrics = evaluate(model, args.eval_samples, seed=2025, device=device)
+            metrics = evaluate(model, args.eval_samples, seed=2025, device=device,
+                              vocab_size=model.cfg.vocab_size)
             trajectory.append({
                 "settle_step": s + 1,
                 "exact_match": metrics["exact_match"],
@@ -561,6 +565,7 @@ def train(model, optimizer, curriculum, args, run_dir, device):
         batch_input, batch_target = sample_batch(
             args.batch_size, min_d, max_d, rng_data, device,
             carry_mix=carry_mix,
+            vocab_size=model.cfg.vocab_size,
         )
         if args.ar_loss:
             loss = ar_training_loss(model, batch_input, batch_target)
@@ -605,7 +610,8 @@ def train(model, optimizer, curriculum, args, run_dir, device):
 
         # ── Evaluation + checkpointing ─────────────────────────────────
         if step > 0 and step % args.eval_interval == 0:
-            metrics = evaluate(model, args.eval_samples, seed=2025, device=device)
+            metrics = evaluate(model, args.eval_samples, seed=2025, device=device,
+                              vocab_size=model.cfg.vocab_size)
             last_tok_acc = metrics["token_accuracy"]
             last_val_exact = metrics["exact_match"]
             elapsed = time.time() - t0
@@ -659,7 +665,8 @@ def train(model, optimizer, curriculum, args, run_dir, device):
                 perfect_since_step = None
 
     # Final eval
-    final = evaluate(model, args.eval_samples, seed=2025, device=device)
+    final = evaluate(model, args.eval_samples, seed=2025, device=device,
+                     vocab_size=model.cfg.vocab_size)
     log(f"FINAL | exact {final['exact_match']:.6f} | tok_acc {final['token_accuracy']:.4f}")
     _save_checkpoint(model, optimizer, args.steps, final, args, ckpt_dir / "last.pt")
 
@@ -696,28 +703,42 @@ def parse_args():
     p.add_argument("--ffn-bias", action="store_true", default=True)
     p.add_argument("--no-ffn-bias", dest="ffn_bias", action="store_false")
     p.add_argument("--pos-mode", default="learned", choices=["learned", "spiral_correct", "zero"])
-    p.add_argument("--pos-correction-mode", default="full", choices=["full", "linear"],
+    p.add_argument("--pos-correction-mode", default="full", choices=["full", "linear", "none"],
                    help="Position correction: 'full' (10 params) or 'linear' (2 params)")
-    p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos"],
-                   help="Freeze special positions to zero: 'eos' saves 3p, 'plus_eos' saves 6p")
+    p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos", "all"],
+                   help="Freeze special positions to zero: 'eos' saves 4p, 'plus_eos' saves 8p, 'all' saves 12p")
+    p.add_argument("--freeze-z-hi", action="store_true", default=False,
+                   help="Freeze z_hi carry position to zero (saves pos_dim params)")
+    p.add_argument("--freeze-spiral", type=str, default="",
+                   help="Comma-sep spiral params to freeze as buffers: amp,phase,slope,offset")
     p.add_argument("--alibi", action="store_true", default=False,
                    help="Add ALiBi attention bias with learned per-head slopes")
     p.add_argument("--qk-source", default="pos", choices=["pos", "tok"],
                    help="Q,K input: 'pos' (position subspace) or 'tok' (token subspace)")
     p.add_argument("--tie-qk", action="store_true", default=False)
+    p.add_argument("--tie-vo", action="store_true", default=False,
+                   help="Tie v_proj to head_proj (v_proj.weight = head_proj.weight.T, saves 10p at d5h1)")
     p.add_argument("--attn-out-rank", type=int, default=0)
     p.add_argument("--num-kv-heads", type=int, default=0,
                    help="Number of KV heads for GQA (0 = same as n_heads = standard MHA)")
     p.add_argument("--q-phase", action="store_true", default=False,
                    help="Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)")
+    p.add_argument("--q-proj-rank", type=int, default=0,
+                   help="Low-rank factorization of q_proj (0=full rank)")
     p.add_argument("--share-layers", action="store_true", default=False)
-    p.add_argument("--norm-mode", default="full", choices=["full", "shared", "fixed", "no_ln2"],
-                   help="RMSNorm mode: full (18p), shared (6p), fixed (0p), no_ln2 (12p)")
+    p.add_argument("--norm-mode", default="full", choices=["full", "shared", "scalar", "fixed", "no_ln2"],
+                   help="RMSNorm mode: full (18p), shared (6p), scalar (1p), fixed (0p), no_ln2 (12p)")
     p.add_argument("--freeze-pad", action="store_true", default=False,
                    help="Freeze PAD token embedding to zero (saves tok_dim params)")
     p.add_argument("--softmax1", action="store_true", default=False,
                    help="Use softmax1 (add 1 to denominator, allows attention sum < 1)")
+    p.add_argument("--attn-mode", default="split", choices=["split", "offset", "hard_offset"],
+                   help="Attention mode: 'split' (Q/K from pos, 26p), 'offset' (learnable bias, ~10p), 'hard_offset' (fixed, 0p)")
     p.add_argument("--token-init", default="spiral", choices=["spiral", "normal"])
+    p.add_argument("--tok-emb-mode", default="learned", choices=["learned", "parametric"],
+                   help="Token embedding mode: 'learned' (vocab_size x tok_dim params) or 'parametric' (4 arc params)")
+    p.add_argument("--vocab-size", type=int, default=14, choices=[10, 12, 14],
+                   help="Vocabulary size: 14 (default), 12 (merge PLUS/EQUALS), 10 (all specials → digit-0)")
 
     # Training
     p.add_argument("--steps", type=int, default=500_000)
@@ -778,6 +799,8 @@ def parse_args():
     # Resume
     p.add_argument("--resume", type=str, default=None,
                    help="Path to checkpoint to resume from")
+    p.add_argument("--warm-start", type=str, default=None,
+                   help="Path to checkpoint for warm-starting (loads compatible weights only, no optimizer)")
 
     return p.parse_args()
 
@@ -806,17 +829,24 @@ def main():
         pos_mode=args.pos_mode,
         pos_correction_mode=args.pos_correction_mode,
         freeze_special=args.freeze_special,
+        freeze_z_hi=args.freeze_z_hi,
+        freeze_spiral=args.freeze_spiral,
         alibi=args.alibi,
         qk_source=args.qk_source,
         tie_qk=args.tie_qk,
+        tie_vo=args.tie_vo,
         attn_out_rank=args.attn_out_rank,
         num_kv_heads=args.num_kv_heads,
         q_phase=args.q_phase,
+        q_proj_rank=args.q_proj_rank,
         share_layers=args.share_layers,
         norm_mode=args.norm_mode,
         freeze_pad=args.freeze_pad,
         softmax1=args.softmax1,
         token_init=args.token_init,
+        tok_emb_mode=args.tok_emb_mode,
+        vocab_size=args.vocab_size,
+        attn_mode=args.attn_mode,
     )
 
     model = MicroAdder(cfg).to(device)
@@ -839,6 +869,21 @@ def main():
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         print(f"Resumed from {args.resume} (step {ckpt.get('step', '?')})")
+
+    # Warm-start: load compatible weights from a different checkpoint
+    if args.warm_start:
+        ckpt = torch.load(args.warm_start, map_location=device, weights_only=False)
+        src_sd = ckpt["model_state_dict"]
+        tgt_sd = model.state_dict()
+        loaded, skipped = 0, 0
+        for k, v in src_sd.items():
+            if k in tgt_sd and tgt_sd[k].shape == v.shape:
+                tgt_sd[k] = v
+                loaded += 1
+            else:
+                skipped += 1
+        model.load_state_dict(tgt_sd, strict=False)
+        print(f"Warm-started from {args.warm_start}: loaded {loaded}, skipped {skipped} keys")
 
     # Curriculum
     curriculum = parse_curriculum(args.curriculum)

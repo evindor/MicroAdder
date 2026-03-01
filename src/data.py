@@ -5,12 +5,27 @@ from typing import List, Tuple
 
 import torch
 
-# ── Token IDs ──────────────────────────────────────────────────────────────
+# ── Token IDs (default vocab=14) ──────────────────────────────────────────
 PLUS = 10
 EQUALS = 11
 EOS = 12
 PAD = 13
 VOCAB_SIZE = 14
+
+# ── Reduced vocabularies ──────────────────────────────────────────────────
+# vocab=10: all special tokens map to digit-0 (distinguished by position only)
+# vocab=12: PLUS/EQUALS map to digit-0, EOS=10, PAD=11
+
+def get_token_ids(vocab_size: int = 14) -> dict:
+    """Return token ID mapping for a given vocabulary size."""
+    if vocab_size == 14:
+        return {"PLUS": 10, "EQUALS": 11, "EOS": 12, "PAD": 13}
+    elif vocab_size == 12:
+        return {"PLUS": 0, "EQUALS": 0, "EOS": 10, "PAD": 11}
+    elif vocab_size == 10:
+        return {"PLUS": 0, "EQUALS": 0, "EOS": 0, "PAD": 0}
+    else:
+        raise ValueError(f"Unsupported vocab_size: {vocab_size}")
 
 # ── Sequence layout ────────────────────────────────────────────────────────
 # X_0..X_9  +  Y_0..Y_9  =  Z_0..Z_10  EOS
@@ -55,27 +70,37 @@ def encode_number(n: int, num_digits: int = MAX_DIGITS) -> List[int]:
     return digits
 
 
-def decode_answer(tokens: List[int]) -> int:
-    """Decode LSB-first digit tokens back to integer (stops at EOS/non-digit)."""
+def decode_answer(tokens: List[int], vocab_size: int = 14) -> int:
+    """Decode LSB-first digit tokens back to integer.
+
+    For vocab=14/12: stops at first token >= 10 (EOS/special).
+    For vocab=10: reads exactly ANSWER_LEN digits (no EOS marker to stop at).
+    """
     result = 0
+    eos_id = get_token_ids(vocab_size)["EOS"]
     for i, tok in enumerate(tokens):
-        if tok >= 10:
+        if i >= ANSWER_LEN:
+            break
+        if vocab_size >= 12 and tok >= 10:
             break
         result += tok * (10 ** i)
     return result
 
 
-def make_example(a: int, b: int) -> Tuple[List[int], List[int]]:
+def make_example(a: int, b: int, vocab_size: int = 14) -> Tuple[List[int], List[int]]:
     """Create (input_ids, targets) pair for a + b.
 
     input_ids:  tokens[0:33]  (teacher-forced input)
     targets:    tokens[1:34]  with -100 mask on prompt positions
+
+    vocab_size: 14 (default), 12 (merge PLUS/EQUALS), or 10 (all specials → 0)
     """
+    tids = get_token_ids(vocab_size)
     s = a + b
     x = encode_number(a, MAX_DIGITS)
     y = encode_number(b, MAX_DIGITS)
     z = encode_number(s, ANSWER_LEN)
-    tokens = x + [PLUS] + y + [EQUALS] + z + [EOS]
+    tokens = x + [tids["PLUS"]] + y + [tids["EQUALS"]] + z + [tids["EOS"]]
     assert len(tokens) == SEQ_LEN
 
     input_ids = tokens[:SEQ_LEN - 1]                           # length 33
@@ -92,6 +117,7 @@ def sample_batch(
     rng: random.Random,
     device: torch.device,
     carry_mix: float = 0.0,
+    vocab_size: int = 14,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Sample a batch of addition examples.
 
@@ -107,7 +133,7 @@ def sample_batch(
         else:
             a = rng.randint(min_val, max_val)
             b = rng.randint(min_val, max_val)
-        inp, tgt = make_example(a, b)
+        inp, tgt = make_example(a, b, vocab_size=vocab_size)
         inputs.append(inp)
         targets.append(tgt)
 

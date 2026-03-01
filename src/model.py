@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from .data import (
     VOCAB_SIZE, SEQ_LEN, MAX_DIGITS, ANSWER_LEN,
     POS_SOURCES, POS_INDICES,
+    X_START, PLUS_POS, Y_START, EQ_POS, Z_START, EOS_POS,
 )
 
 
@@ -39,8 +40,8 @@ class ModelConfig:
     ffn_bias: bool = True
 
     pos_mode: str = "learned"       # "learned" | "spiral_correct" | "zero"
-    pos_correction_mode: str = "full"  # "full" (10 params) | "linear" (2 params)
-    freeze_special: str = "none"   # "none" | "eos" | "plus_eos"
+    pos_correction_mode: str = "full"  # "full" (10 params) | "linear" (2 params) | "none" (0 params)
+    freeze_special: str = "none"   # "none" | "eos" | "plus_eos" | "all"
     alibi: bool = False             # Add ALiBi attention bias (learned slopes)
     qk_source: str = "pos"         # "pos" = Q,K read pos_dim; "tok" = Q,K read tok_dim
     tie_qk: bool = False            # True = share Q,K projection
@@ -48,11 +49,17 @@ class ModelConfig:
     num_kv_heads: int = 0           # 0 = same as n_heads (MHA); <n_heads = GQA
     q_phase: bool = False           # Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)
     share_layers: bool = False      # Universal transformer style
-    norm_mode: str = "full"         # "full" (18p) | "shared" (6p) | "fixed" (0p) | "no_ln2" (12p)
+    norm_mode: str = "full"         # "full" (18p) | "shared" (6p) | "scalar" (1p) | "fixed" (0p) | "no_ln2" (12p)
+    tie_vo: bool = False            # Tie v_proj.weight = head_proj.weight.T (saves tok_dim*head_dim params)
     freeze_pad: bool = False        # Freeze PAD token embedding to zero (saves tok_dim params)
+    freeze_z_hi: bool = False       # Freeze z_hi carry position to zero (saves pos_dim params)
+    freeze_spiral: str = ""         # Comma-separated spiral params to freeze: "slope,offset" etc
+    q_proj_rank: int = 0            # 0 = full rank q_proj; >0 = low-rank factorization (saves params)
     softmax1: bool = False          # Use softmax1 (add 1 to denominator, allows attn sum < 1)
+    attn_mode: str = "split"        # "split" | "offset" | "hard_offset"
 
     token_init: str = "spiral"      # "spiral" | "normal"
+    tok_emb_mode: str = "learned"   # "learned" | "parametric"
     vocab_size: int = VOCAB_SIZE
     max_seq_len: int = SEQ_LEN
 
@@ -75,6 +82,18 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x / rms * self.weight
+
+
+class ScalarRMSNorm(nn.Module):
+    """RMSNorm with a single shared scalar weight (1 param instead of d_model)."""
+    def __init__(self, d: int, eps: float = 1e-5):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(1))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x / rms * self.scale
 
 
 class LowRankLinear(nn.Module):
@@ -119,7 +138,10 @@ class SplitAttention(nn.Module):
         self.kv_repeat = cfg.n_heads // self.num_kv_heads
 
         qk_in_dim = cfg.tok_dim if cfg.qk_source == "tok" else cfg.pos_dim
-        self.q_proj = nn.Linear(qk_in_dim, self.inner_dim, bias=False)
+        if cfg.q_proj_rank > 0:
+            self.q_proj = LowRankLinear(qk_in_dim, self.inner_dim, cfg.q_proj_rank)
+        else:
+            self.q_proj = nn.Linear(qk_in_dim, self.inner_dim, bias=False)
         if not cfg.tie_qk:
             self.k_proj = nn.Linear(qk_in_dim, self.kv_inner_dim, bias=False)
         else:
@@ -176,7 +198,7 @@ class SplitAttention(nn.Module):
         B, H, T, D = x.shape
         return x.unsqueeze(2).expand(B, H, self.kv_repeat, T, D).reshape(B, H * self.kv_repeat, T, D)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, v_weight: torch.Tensor = None) -> torch.Tensor:
         B, T, _ = x.shape
         x_tok = x[:, :, :self.tok_dim]
         x_pos = x[:, :, self.tok_dim:]
@@ -188,7 +210,12 @@ class SplitAttention(nn.Module):
             k = self.q_proj(x_qk)[:, :, :self.kv_inner_dim]
         else:
             k = self.k_proj(x_qk)
-        v = self.v_proj(x_tok)
+        if v_weight is not None:
+            # tie_vo: use external weight (head_proj.weight) as v_proj
+            # v_weight shape: (tok_dim, d_model), we want x_tok @ v_weight = (B,T,tok_dim) @ (tok_dim, d_model) = (B,T,d_model)
+            v = x_tok @ v_weight
+        else:
+            v = self.v_proj(x_tok)
 
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -222,6 +249,232 @@ class SplitAttention(nn.Module):
         return self.out_proj(out)
 
 
+class OffsetAttention(nn.Module):
+    """Fixed-offset attention: replaces Q/K projections with learned positional biases.
+
+    Exploits the discovery that attention in split-subspace addition is purely
+    positional routing with fixed offsets:
+      Head 0: attends to X_{i+2} and Y_{i+1} (carry lookahead)
+      Head 1: attends to X_{i+1}, Y_i, and self (current context)
+
+    Instead of learning a full q_proj (24p) + q_phase (2p) = 26p, we learn:
+      - Per-head X-offset and Y-offset (what digit offset to attend to): 4p
+      - Per-head sharpness (how peaked the attention is): 2p
+      - Per-head self-attention weight: 2p
+      - Per-head carry/special weight: 2p
+    Total: ~10p instead of 26p, saving ~16p.
+    """
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.head_dim
+        self.inner_dim = cfg.n_heads * cfg.head_dim
+        self.tok_dim = cfg.tok_dim
+        self.pos_dim = cfg.pos_dim
+
+        # V projection (same as SplitAttention — reads token subspace)
+        self.v_proj = nn.Linear(cfg.tok_dim, self.inner_dim, bias=False)
+
+        # Output projection
+        if cfg.attn_out_rank > 0:
+            self.out_proj = LowRankLinear(self.inner_dim, cfg.d_model, cfg.attn_out_rank)
+        else:
+            self.out_proj = nn.Linear(self.inner_dim, cfg.d_model, bias=False)
+
+        # Offset attention parameters
+        # Per-head preferred offset for X section and Y section
+        # Corrected init: Head0=(+1, 0), Head1=(0, -1) based on re-analysis
+        self.x_offset = nn.Parameter(torch.tensor([1.0, 0.0]))   # (n_heads,)
+        self.y_offset = nn.Parameter(torch.tensor([0.0, -1.0]))  # (n_heads,)
+        # Per-head sharpness (higher = more peaked attention)
+        self.sharpness = nn.Parameter(torch.tensor([3.0, 3.0]))  # (n_heads,)
+        # Per-head self-attention logit
+        self.self_weight = nn.Parameter(torch.tensor([-2.0, 0.0]))  # (n_heads,)
+        # Per-head carry/special position weight
+        self.special_weight = nn.Parameter(torch.tensor([0.0, -2.0]))  # (n_heads,)
+
+        # Build section membership buffers (which sequence positions are X, Y, Z, special)
+        T = cfg.max_seq_len
+        # digit_index[j] = which digit position (0-9) is at sequence position j, or -1
+        digit_index = torch.full((T,), -1, dtype=torch.float32)
+        # section[j] = 0 (X), 1 (Y), 2 (Z/carry), 3 (special)
+        section = torch.full((T,), 3, dtype=torch.long)
+
+        for j in range(MAX_DIGITS):
+            digit_index[X_START + j] = j
+            section[X_START + j] = 0
+        for j in range(MAX_DIGITS):
+            digit_index[Y_START + j] = j
+            section[Y_START + j] = 1
+        for j in range(MAX_DIGITS):
+            digit_index[Z_START + j] = j
+            section[Z_START + j] = 2
+        digit_index[Z_START + MAX_DIGITS] = MAX_DIGITS  # carry position
+        section[Z_START + MAX_DIGITS] = 2
+
+        self.register_buffer("_digit_index", digit_index)
+        self.register_buffer("_section", section)
+
+        # Causal mask
+        mask = torch.tril(torch.ones(T, T))
+        self.register_buffer("causal_mask", mask.unsqueeze(0).unsqueeze(0))
+
+    def _compute_attn_bias(self, T: int) -> torch.Tensor:
+        """Compute attention bias matrix. Returns (1, n_heads, T, T)."""
+        digit_idx = self._digit_index[:T]  # (T,)
+        section = self._section[:T]         # (T,)
+
+        # For each query position i and key position j:
+        # If j is in X section: score = -sharpness * (digit_index[j] - digit_index[i] - x_offset)^2
+        # If j is in Y section: score = -sharpness * (digit_index[j] - digit_index[i] - y_offset)^2
+        # If j == i (self): score = self_weight
+        # If j is special/carry: score = special_weight
+
+        # Compute digit offset matrix: digit_index[j] - digit_index[i]
+        # Shape: (T, T)
+        offset = digit_idx.unsqueeze(0) - digit_idx.unsqueeze(1)  # (T, T) — offset[i,j] = digit[j] - digit[i]
+
+        # Per-head attention bias: (n_heads, T, T)
+        bias = torch.zeros(self.n_heads, T, T, device=digit_idx.device)
+
+        x_mask = (section == 0).float()  # (T,) — which positions are X
+        y_mask = (section == 1).float()  # (T,) — which positions are Y
+
+        for h in range(self.n_heads):
+            sharp = self.sharpness[h].abs() + 0.1  # ensure positive sharpness
+            # X section contribution
+            x_score = -sharp * (offset - self.x_offset[h]).pow(2)  # (T, T)
+            # Y section contribution
+            y_score = -sharp * (offset - self.y_offset[h]).pow(2)  # (T, T)
+
+            # Combine: multiply by section masks
+            score = x_score * x_mask.unsqueeze(0) + y_score * y_mask.unsqueeze(0)
+
+            # Self-attention
+            eye = torch.eye(T, device=digit_idx.device)
+            score = score + self.self_weight[h] * eye
+
+            # Special/carry positions
+            special_mask = ((section != 0) & (section != 1)).float()
+            score = score + self.special_weight[h] * special_mask.unsqueeze(0)
+
+            bias[h] = score
+
+        return bias.unsqueeze(0)  # (1, n_heads, T, T)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        x_tok = x[:, :, :self.tok_dim]
+
+        v = self.v_proj(x_tok).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Compute attention from positional bias only (no Q/K projections!)
+        att = self._compute_attn_bias(T)  # (1, n_heads, T, T)
+        att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
+        att = F.softmax(att, dim=-1)
+
+        # Expand attention for batch
+        att = att.expand(B, -1, -1, -1)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T, self.inner_dim)
+        return self.out_proj(out)
+
+
+class HardOffsetAttention(nn.Module):
+    """Hardcoded attention patterns — 0 learnable params for Q/K.
+
+    Based on the structural analysis discovery:
+      Head 0: A_i → 50% X_{i+2} + 50% Y_{i+1} (carry lookahead)
+      Head 1: A_i → 33% X_{i+1} + 33% Y_i + 33% self (current context)
+
+    Special cases:
+      A_8 (Head 0): → z_hi carry position (97%)
+      A_9 (both): → self (100%)
+      Prompt positions: uniform causal attention
+
+    The only learnable parts are V projection and output projection.
+    """
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.n_heads = cfg.n_heads
+        self.head_dim = cfg.head_dim
+        self.inner_dim = cfg.n_heads * cfg.head_dim
+        self.tok_dim = cfg.tok_dim
+
+        # V projection (reads token subspace)
+        self.v_proj = nn.Linear(cfg.tok_dim, self.inner_dim, bias=False)
+
+        # Output projection
+        if cfg.attn_out_rank > 0:
+            self.out_proj = LowRankLinear(self.inner_dim, cfg.d_model, cfg.attn_out_rank)
+        else:
+            self.out_proj = nn.Linear(self.inner_dim, cfg.d_model, bias=False)
+
+        # Build hardcoded attention weights
+        T = cfg.max_seq_len
+        attn = torch.zeros(cfg.n_heads, T, T)  # (n_heads, T, T)
+
+        # For prompt positions (0-21): uniform causal
+        for i in range(min(22, T)):
+            attn[0, i, :i+1] = 1.0 / (i + 1)
+            attn[1, i, :i+1] = 1.0 / (i + 1)
+
+        # For answer positions Z_i (positions 22+i):
+        # Corrected patterns based on re-analysis of structural_analysis.md:
+        # (The diagnostics had an off-by-one: their "A0" was actually Z_1)
+        #
+        # Head 0: Z_i → 50% X_{i+1} + 50% Y_i (lookahead by +1 in X)
+        # Head 1: Z_i → 33% X_i + 33% Y_{i-1} + 33% self (current context)
+        #
+        # Special cases:
+        # Z_9 (Head 0): → PLUS position (97%) — uses PLUS as summary signal
+        # Z_10 (carry digit): → self
+        for i in range(min(ANSWER_LEN + 1, T - Z_START)):
+            pos = Z_START + i  # sequence position
+            if i <= 8:
+                # Head 0: 50% X_{i+1} + 50% Y_i
+                if i + 1 < MAX_DIGITS:
+                    x_pos = X_START + i + 1
+                    y_pos = Y_START + i
+                    attn[0, pos, x_pos] = 0.5
+                    attn[0, pos, y_pos] = 0.5
+                else:
+                    # i=9: X_10 doesn't exist, attend to PLUS as fallback
+                    attn[0, pos, PLUS_POS] = 1.0
+
+                # Head 1: 33% X_i + 33% Y_{max(i-1,0)} + 33% self
+                x_pos1 = X_START + min(i, MAX_DIGITS - 1)
+                y_pos1 = Y_START + max(i - 1, 0)
+                attn[1, pos, x_pos1] = 1.0 / 3
+                attn[1, pos, y_pos1] = 1.0 / 3
+                attn[1, pos, pos] = 1.0 / 3
+            elif i == 9:
+                # Z_9 (Head 0): PLUS position
+                attn[0, pos, PLUS_POS] = 1.0
+                # Head 1: X_9 + Y_8 + self
+                attn[1, pos, X_START + 9] = 1.0 / 3
+                attn[1, pos, Y_START + 8] = 1.0 / 3
+                attn[1, pos, pos] = 1.0 / 3
+            else:
+                # Z_10 (carry) and EOS: self-attention
+                attn[0, pos, pos] = 1.0
+                attn[1, pos, pos] = 1.0
+
+        self.register_buffer("_hard_attn", attn.unsqueeze(0))  # (1, n_heads, T, T)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.shape
+        x_tok = x[:, :, :self.tok_dim]
+
+        v = self.v_proj(x_tok).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Use precomputed attention (no Q/K computation!)
+        att = self._hard_attn[:, :, :T, :T].expand(B, -1, -1, -1)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T, self.inner_dim)
+        return self.out_proj(out)
+
+
 # ── FFN ────────────────────────────────────────────────────────────────────
 
 class FFN(nn.Module):
@@ -248,10 +501,12 @@ class FixedRMSNorm(nn.Module):
 
 
 def _make_norm(cfg: ModelConfig) -> nn.Module:
-    """Create a norm layer based on norm_mode. For 'shared' mode, the caller
-    must handle weight sharing — this returns a normal RMSNorm."""
+    """Create a norm layer based on norm_mode. For 'shared'/'scalar' mode, the caller
+    must handle weight sharing — this returns a normal RMSNorm/ScalarRMSNorm."""
     if cfg.norm_mode == "fixed":
         return FixedRMSNorm(cfg.d_model)
+    if cfg.norm_mode == "scalar":
+        return ScalarRMSNorm(cfg.d_model)
     return RMSNorm(cfg.d_model)
 
 
@@ -260,14 +515,19 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.ln1 = _make_norm(cfg)
-        self.attn = SplitAttention(cfg)
+        if cfg.attn_mode == "offset":
+            self.attn = OffsetAttention(cfg)
+        elif cfg.attn_mode == "hard_offset":
+            self.attn = HardOffsetAttention(cfg)
+        else:
+            self.attn = SplitAttention(cfg)
         self.has_ln2 = cfg.norm_mode != "no_ln2"
         if self.has_ln2:
             self.ln2 = _make_norm(cfg)
         self.ffn = FFN(cfg.d_model, cfg.ffn_dim, bias=cfg.ffn_bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x: torch.Tensor, v_weight: torch.Tensor = None) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), v_weight=v_weight)
         if self.has_ln2:
             x = x + self.ffn(self.ln2(x))
         else:
@@ -283,8 +543,18 @@ class MicroAdder(nn.Module):
         assert cfg.d_model == cfg.tok_dim + cfg.pos_dim
         self.cfg = cfg
 
-        # Token embedding (learnable, spiral-initialized)
-        if cfg.freeze_pad:
+        # Token embedding
+        if cfg.tok_emb_mode == "parametric":
+            # Parametric: digits placed on a learnable arc in 2D
+            # emb[d] = [A * cos(start + d * stride), B * sin(start + d * stride)]
+            # 4 params for 10+ digits, instead of 20+ learned
+            assert cfg.tok_dim == 2, "Parametric tok_emb only supports tok_dim=2"
+            self.tok_arc_A = nn.Parameter(torch.tensor(2.5))  # amplitude dim 0
+            self.tok_arc_B = nn.Parameter(torch.tensor(2.5))  # amplitude dim 1
+            self.tok_arc_start = nn.Parameter(torch.tensor(-1.2))  # start angle (~-71°)
+            self.tok_arc_stride = nn.Parameter(torch.tensor(0.29))  # angle per digit (~16.6°)
+            # No nn.Embedding — embeddings computed on the fly from arc params
+        elif cfg.freeze_pad:
             # Learnable embeddings for tokens 0..vocab_size-2; PAD (last) is frozen zero
             self.tok_emb = nn.Embedding(cfg.vocab_size - 1, cfg.tok_dim)
             self.register_buffer("_pad_emb", torch.zeros(1, cfg.tok_dim))
@@ -316,7 +586,7 @@ class MicroAdder(nn.Module):
         # Output head
         self.ln_f = _make_norm(cfg)
 
-        # Shared norm weights: point all norm .weight attrs to a single parameter
+        # Shared norm weights: point all norm weight attrs to a single parameter
         if cfg.norm_mode == "shared":
             shared_w = self.blocks[0].ln1.weight
             for block in self.blocks:
@@ -324,8 +594,29 @@ class MicroAdder(nn.Module):
                 if block.has_ln2:
                     block.ln2.weight = shared_w
             self.ln_f.weight = shared_w
+        elif cfg.norm_mode == "scalar":
+            shared_s = self.blocks[0].ln1.scale
+            for block in self.blocks:
+                block.ln1.scale = shared_s
+                if block.has_ln2:
+                    block.ln2.scale = shared_s
+            self.ln_f.scale = shared_s
         self.head_proj = nn.Linear(cfg.d_model, cfg.tok_dim, bias=False)
         # Output logits = head_proj(x) @ tok_emb.weight.T  (tied)
+
+        # Tie V projection weight to head_proj: v_proj uses head_proj.weight.T
+        # v_proj needs (tok_dim→inner_dim), head_proj is (d_model→tok_dim)
+        # When inner_dim == d_model, v_proj.weight (inner_dim, tok_dim) = head_proj.weight.T (d_model, tok_dim)
+        if cfg.tie_vo:
+            assert cfg.n_heads * cfg.head_dim == cfg.d_model, \
+                "tie_vo requires inner_dim (n_heads*head_dim) == d_model"
+            for block in self.blocks:
+                attn = block.attn
+                # Remove v_proj params — forward will use head_proj.weight instead
+                del attn.v_proj
+            self._tie_vo = True
+        else:
+            self._tie_vo = False
 
         self._init_weights()
 
@@ -343,17 +634,21 @@ class MicroAdder(nn.Module):
             # Parametric spiral (4 params)
             # pos_dim>=3: amp*cos, amp*sin, slope*i+offset (circle + linear ramp)
             # pos_dim==2: amp*cos(+phase), slope*sin(+offset) (ellipse with independent phases)
-            self.spiral_amp = nn.Parameter(torch.tensor(1.0))
-            self.spiral_phase = nn.Parameter(torch.tensor(0.0))
+            frozen_spiral = set(cfg.freeze_spiral.split(",")) if cfg.freeze_spiral else set()
             slope_init = 1.0 if cfg.pos_dim == 2 else 1.0 / max(1, MAX_DIGITS - 1)
-            self.spiral_slope = nn.Parameter(torch.tensor(slope_init))
-            self.spiral_offset = nn.Parameter(torch.tensor(0.0))
+            for name, init_val in [("amp", 1.0), ("phase", 0.0), ("slope", slope_init), ("offset", 0.0)]:
+                if name in frozen_spiral:
+                    self.register_buffer(f"spiral_{name}", torch.tensor(init_val))
+                else:
+                    setattr(self, f"spiral_{name}", nn.Parameter(torch.tensor(init_val)))
             # Per-position scale correction
             if cfg.pos_correction_mode == "full":
                 self.pos_correction = nn.Parameter(torch.zeros(MAX_DIGITS))  # 10 params
             elif cfg.pos_correction_mode == "linear":
                 self.pos_corr_slope = nn.Parameter(torch.tensor(0.0))        # 2 params
                 self.pos_corr_intercept = nn.Parameter(torch.tensor(0.0))
+            elif cfg.pos_correction_mode == "none":
+                pass  # No correction parameters — spiral positions used as-is
             else:
                 raise ValueError(f"Unknown pos_correction_mode: {cfg.pos_correction_mode}")
         else:
@@ -365,7 +660,10 @@ class MicroAdder(nn.Module):
             self.register_buffer("_zero_special", torch.zeros(3, cfg.pos_dim))
         else:
             # Carry position
-            self.z_hi_pos = nn.Parameter(torch.zeros(1, cfg.pos_dim))
+            if cfg.freeze_z_hi:
+                self.register_buffer("z_hi_pos", torch.zeros(1, cfg.pos_dim))
+            else:
+                self.z_hi_pos = nn.Parameter(torch.zeros(1, cfg.pos_dim))
 
             # Special token positions (PLUS=0, EQUALS=1, EOS=2)
             if cfg.freeze_special == "none":
@@ -379,6 +677,9 @@ class MicroAdder(nn.Module):
                 self.special_pos_equals = nn.Parameter(torch.zeros(1, cfg.pos_dim))
                 self.register_buffer("_plus_pos", torch.zeros(1, cfg.pos_dim))
                 self.register_buffer("_eos_pos", torch.zeros(1, cfg.pos_dim))
+            elif cfg.freeze_special == "all":
+                # All special positions fixed to zero (saves all special_pos params)
+                self.register_buffer("_frozen_special", torch.zeros(3, cfg.pos_dim))
             else:
                 raise ValueError(f"Unknown freeze_special: {cfg.freeze_special}")
 
@@ -391,8 +692,10 @@ class MicroAdder(nn.Module):
             return self.special_pos
         elif cfg.freeze_special == "eos":
             return torch.cat([self.special_pos_learned, self._eos_pos], dim=0)
-        else:  # plus_eos
+        elif cfg.freeze_special == "plus_eos":
             return torch.cat([self._plus_pos, self.special_pos_equals, self._eos_pos], dim=0)
+        else:  # all
+            return self._frozen_special
 
     def _get_digit_positions(self) -> torch.Tensor:
         """Compute the (MAX_DIGITS, pos_dim) position table."""
@@ -419,8 +722,10 @@ class MicroAdder(nn.Module):
         # Apply correction scaling
         if cfg.pos_correction_mode == "full":
             correction = self.pos_correction
-        else:  # linear
+        elif cfg.pos_correction_mode == "linear":
             correction = self.pos_corr_intercept + self.pos_corr_slope * idx
+        else:  # none
+            return base
         scale = (1.0 + correction).unsqueeze(1)  # (10, 1)
         return base * scale
 
@@ -452,8 +757,8 @@ class MicroAdder(nn.Module):
 
     def _init_weights(self) -> None:
         cfg = self.cfg
-        # Spiral token init
-        if cfg.token_init == "spiral":
+        # Spiral token init (skip for parametric mode — arc params handle init)
+        if cfg.tok_emb_mode != "parametric" and cfg.token_init == "spiral":
             with torch.no_grad():
                 self.tok_emb.weight.zero_()
                 for d in range(min(10, cfg.vocab_size)):
@@ -481,13 +786,15 @@ class MicroAdder(nn.Module):
             with torch.no_grad():
                 if cfg.pos_mode == "learned":
                     nn.init.normal_(self.digit_pos, std=0.02)
-                nn.init.normal_(self.z_hi_pos, std=0.02)
+                if not cfg.freeze_z_hi:
+                    nn.init.normal_(self.z_hi_pos, std=0.02)
                 if cfg.freeze_special == "none":
                     nn.init.normal_(self.special_pos, std=0.02)
                 elif cfg.freeze_special == "eos":
                     nn.init.normal_(self.special_pos_learned, std=0.02)
-                else:  # plus_eos
+                elif cfg.freeze_special == "plus_eos":
                     nn.init.normal_(self.special_pos_equals, std=0.02)
+                # "all" → no learnable special positions to initialize
 
         # Xavier for linear layers
         for module in self.modules():
@@ -498,14 +805,35 @@ class MicroAdder(nn.Module):
 
     # ── Forward / generate ─────────────────────────────────────────────
 
+    def _compute_parametric_emb(self) -> torch.Tensor:
+        """Compute parametric token embeddings from arc parameters.
+
+        emb[d] = [A * cos(start + d * stride), B * sin(start + d * stride)]
+        Returns (vocab_size, tok_dim).
+        """
+        d = torch.arange(self.cfg.vocab_size, device=self.tok_arc_A.device,
+                         dtype=self.tok_arc_A.dtype)
+        angles = self.tok_arc_start + d * self.tok_arc_stride
+        emb = torch.stack([
+            self.tok_arc_A * torch.cos(angles),
+            self.tok_arc_B * torch.sin(angles),
+        ], dim=1)
+        return emb
+
     def _full_tok_weight(self) -> torch.Tensor:
         """Return (vocab_size, tok_dim) embedding table, with frozen PAD row if needed."""
+        if self.cfg.tok_emb_mode == "parametric":
+            return self._compute_parametric_emb()
         if self.cfg.freeze_pad:
             return torch.cat([self.tok_emb.weight, self._pad_emb], dim=0)
         return self.tok_emb.weight
 
     def _embed_tokens(self, idx: torch.Tensor) -> torch.Tensor:
         """Look up token embeddings, routing PAD through the frozen buffer."""
+        if self.cfg.tok_emb_mode == "parametric":
+            # Compute embeddings on the fly and index into them
+            emb_table = self._compute_parametric_emb()  # (vocab_size, tok_dim)
+            return emb_table[idx]
         if self.cfg.freeze_pad:
             # Clamp PAD id to valid range for nn.Embedding, then zero it out
             clamped = idx.clamp(max=self.cfg.vocab_size - 2)
@@ -522,12 +850,13 @@ class MicroAdder(nn.Module):
         pos = self._get_positions(T).unsqueeze(0).expand(B, -1, -1) # (B, T, pos_dim)
         x = torch.cat([tok, pos], dim=-1)                           # (B, T, d_model)
 
+        v_weight = self.head_proj.weight if self._tie_vo else None
         if self.cfg.share_layers:
             for _ in range(self._n_passes):
-                x = self.blocks[0](x)
+                x = self.blocks[0](x, v_weight=v_weight)
         else:
             for block in self.blocks:
-                x = block(x)
+                x = block(x, v_weight=v_weight)
 
         x = self.ln_f(x)
         logits = self.head_proj(x) @ self._full_tok_weight().T      # (B, T, vocab_size)

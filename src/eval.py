@@ -50,7 +50,7 @@ def main():
 
     # ── Edge cases ──────────────────────────────────────────────────────
     if args.autoregressive:
-        edge_pass, edge_total, edge_failures = _run_edge_cases(model, device)
+        edge_pass, edge_total, edge_failures = _run_edge_cases(model, device, vocab_size=cfg.vocab_size)
         print(f"Edge cases: {edge_pass}/{edge_total}")
         for a, b, expected, got in edge_failures:
             print(f"  FAIL: {a} + {b} = {expected}, got {got}")
@@ -60,10 +60,12 @@ def main():
     t0 = time.time()
     if args.autoregressive:
         print(f"Autoregressive evaluation on {args.n_samples} samples (seed={args.seed})...")
-        metrics = evaluate_autoregressive(model, args.n_samples, args.seed, device)
+        metrics = evaluate_autoregressive(model, args.n_samples, args.seed, device,
+                                          vocab_size=cfg.vocab_size)
     else:
         print(f"Teacher-forced evaluation on {args.n_samples} samples (seed={args.seed})...")
-        metrics = evaluate(model, args.n_samples, args.seed, device)
+        metrics = evaluate(model, args.n_samples, args.seed, device,
+                          vocab_size=cfg.vocab_size)
 
     elapsed = time.time() - t0
     print(f"Results ({elapsed:.1f}s):")
@@ -76,7 +78,8 @@ def main():
     n_wrong = args.n_samples - int(metrics['exact_match'] * args.n_samples)
     if args.show_errors > 0 and args.autoregressive and n_wrong > 0:
         print(f"\nFirst {min(args.show_errors, n_wrong)} errors:")
-        _show_errors(model, args.n_samples, args.seed, device, args.show_errors)
+        _show_errors(model, args.n_samples, args.seed, device, args.show_errors,
+                    vocab_size=cfg.vocab_size)
 
     # Qualification check
     qualified = metrics["exact_match"] >= 0.99
@@ -97,14 +100,14 @@ EDGE_CASES = [
 
 
 @torch.no_grad()
-def _run_edge_cases(model, device):
+def _run_edge_cases(model, device, vocab_size=14):
     passed = 0
     failures = []
     for a, b in EDGE_CASES:
-        inp, _ = make_example(a, b)
+        inp, _ = make_example(a, b, vocab_size=vocab_size)
         prompt = torch.tensor([inp[:PROMPT_LEN]], dtype=torch.long, device=device)
         generated = model.generate(prompt, max_new_tokens=ANSWER_LEN + 1)
-        predicted = decode_answer(generated[0].tolist())
+        predicted = decode_answer(generated[0].tolist(), vocab_size=vocab_size)
         expected = a + b
         if predicted == expected:
             passed += 1
@@ -114,16 +117,16 @@ def _run_edge_cases(model, device):
 
 
 @torch.no_grad()
-def _show_errors(model, n_samples, seed, device, max_errors):
+def _show_errors(model, n_samples, seed, device, max_errors, vocab_size=14):
     rng = random.Random(seed)
     shown = 0
     for _ in range(n_samples):
         a = rng.randint(0, 10**10 - 1)
         b = rng.randint(0, 10**10 - 1)
-        inp, _ = make_example(a, b)
+        inp, _ = make_example(a, b, vocab_size=vocab_size)
         prompt = torch.tensor([inp[:PROMPT_LEN]], dtype=torch.long, device=device)
         generated = model.generate(prompt, max_new_tokens=ANSWER_LEN + 1)
-        predicted = decode_answer(generated[0].tolist())
+        predicted = decode_answer(generated[0].tolist(), vocab_size=vocab_size)
         expected = a + b
         if predicted != expected:
             print(f"  {a} + {b} = {expected}, got {predicted}")
