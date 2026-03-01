@@ -172,14 +172,24 @@ def warmup_weight_decay(base_wd: float, step: int, val_exact: float, tok_acc: fl
 
 
 def effective_carry_mix(base_mix: float, step: int, tok_acc: float, args) -> float:
-    """Fade carry_mix to 0 based on token accuracy and step count.
+    """Fade carry_mix to 0.
 
-    - Below fade threshold: full base_mix
-    - Between fade and zero thresholds: linear ramp to 0
-    - Above zero threshold OR past max_steps: 0
+    Two modes:
+    - Step-based (when --carry-mix-fade-start is set): linear fade from base_mix
+      to 0 over steps [fade_start, fade_end]. No metric dependency.
+    - Metric-based (default): fade based on tok_acc thresholds.
     """
     if base_mix <= 0:
         return 0.0
+    # Step-based schedule (no metric feedback loop)
+    if args.carry_mix_fade_start >= 0:
+        if step <= args.carry_mix_fade_start:
+            return base_mix
+        if step >= args.carry_mix_fade_end:
+            return 0.0
+        frac = (step - args.carry_mix_fade_start) / (args.carry_mix_fade_end - args.carry_mix_fade_start)
+        return base_mix * (1.0 - frac)
+    # Metric-based schedule (original)
     if step >= args.carry_mix_max_steps:
         return 0.0
     if tok_acc >= args.carry_mix_tok_acc_zero:
@@ -1078,6 +1088,10 @@ def parse_args():
                    help="Token accuracy where carry_mix reaches 0")
     p.add_argument("--carry-mix-max-steps", type=int, default=100_000,
                    help="Hard step cutoff: carry_mix=0 after this many steps")
+    p.add_argument("--carry-mix-fade-start", type=int, default=-1,
+                   help="Step-based fade: carry_mix starts fading at this step (-1 = use metric-based)")
+    p.add_argument("--carry-mix-fade-end", type=int, default=80_000,
+                   help="Step-based fade: carry_mix reaches 0 at this step")
 
     # Evaluation
     p.add_argument("--eval-interval", type=int, default=3000)

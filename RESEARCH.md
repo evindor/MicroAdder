@@ -25,9 +25,9 @@ In short: if you can swap in a different set of weights and use the exact same i
 - Fixed/sinusoidal positional encodings are not counted (following the original Transformer paper convention)
 - Learned positional encodings are counted
 
-## Current Best: 75 Parameters, 100% Accuracy (From Scratch)
+## Current Best: 74 Parameters, 100% Accuracy (From Scratch)
 
-A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture. Trained from scratch (seed 80085) with no warm-starting or frozen pretrained values.
+A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture. Trained from scratch with no warm-starting or frozen pretrained values. **3/3 random seeds converge** with high carry-mix training.
 
 ```
 d_model = 5 = tok_dim(2) + pos_dim(3)
@@ -35,16 +35,15 @@ d_model = 5 = tok_dim(2) + pos_dim(3)
 FFN dim = 2 (no bias, GELU), shared RMSNorm (all 3 norms share one weight)
 Tied Q/K + q-phase rotation (1 param), rank-1 out_proj
 Tied V/output (v_proj = head_proj.T, saves 10p)
-Parametric tok_emb (4 arc params: A, B, start, stride)
+Parametric tok_emb (3 arc params: A=B tied, start, stride — circular embedding)
 Spiral positions (4 params: amp, phase, slope, offset), no correction
 PLUS/EOS frozen to zero, EQUALS learned (3p), z_hi carry learned (3p)
 ```
 
-### Parameter Budget (75p)
+### Parameter Budget (74p)
 
 ```
-tok_arc_A          1
-tok_arc_B          1
+tok_arc_A (=B)     1  (circular arc amplitude)
 tok_arc_start      1
 tok_arc_stride     1
 spiral_amp         1
@@ -61,10 +60,10 @@ FFN fc2           10  (2 -> 5, no bias)
 head_proj         10  (5 -> 2, also v_proj via tie)
 RMSNorm (shared)   5  (one weight vector)
 ─────────────────────
-TOTAL             75
+TOTAL             74
 ```
 
-Note: Fixed/sinusoidal positional encodings are not counted per the parameter counting rules. All 75 parameters above are learned.
+Note: Fixed/sinusoidal positional encodings are not counted per the parameter counting rules. All 74 parameters above are learned.
 
 ### Previous From-Scratch Best: 170p Parameter Budget
 
@@ -86,17 +85,24 @@ head_proj         12  (6 -> 2)
 TOTAL            170
 ```
 
-### Training Recipe (75p from scratch)
+### Training Recipe (74p — high carry-mix with step-based fade)
 
-- AdamW (lr=0.02), cosine decay, 500K step budget
+- AdamW (lr=0.02), cosine decay, **120K step budget** (shorter = steeper LR decay for stability)
 - Adaptive weight decay: `--wd-adaptive --wd-drop-exact 0.01 --wd-drop-exact-final 0.05`
-- Carry-mix curriculum: 30% carry-heavy examples, fading to 0% as tok_acc 0.7→0.9
+- **Carry-mix 0.8, step-based fade**: `--carry-mix 0.8 --carry-mix-fade-start 10000 --carry-mix-fade-end 80000`
+  - Full 80% carry-heavy examples during curriculum warmup (steps 0-10K)
+  - Linear fade to 0% over steps 10K-80K (no metric feedback)
+  - Critical: metric-based fade creates oscillation at high carry_mix (accuracy up → carries removed → accuracy down → carries restored)
 - Digit curriculum: 1-3 digits for 2K steps, 1-6 for 5K, then full 1-10
 - `--no-ffn-bias` required for sub-100p models (default is ffn_bias=True)
-- Seed 80085: grokked from scratch, stable 100% accuracy
-- Seed-sensitive: ~10-20% of random seeds show grokking signals at 75p; only s80085 confirmed to stably grok both 75p and 72p
-- From-scratch training works down to 72p with seed 80085
-- Below 75p requires warm-starting (see "Warm-Start Exploration" below)
+- **3/3 random seeds grokked** (s45214 at 78K, s71046 at 81K, s78988 at ~117K)
+- Previous recipe (cm=0.3, metric fade, 500K steps) had ~10% grok rate
+
+### Previous Training Recipe (75p — lower carry-mix)
+
+- carry_mix=0.3 with metric-based fade (tok_acc 0.7→0.9), 500K steps
+- Only seed 80085 confirmed to grok at 75p from scratch
+- Seed-sensitive: ~10-20% of random seeds show grokking signals
 
 ---
 
@@ -140,8 +146,11 @@ These models all train from random initialization with no warm-starting. Every p
  |    v_proj eliminated: V = x_tok @ head_proj.weight
  |
  75p  Freeze PLUS+EOS positions (-3p)
-      Delimiter positions frozen at zero
-      Groks from scratch with seed 80085
+ |    Delimiter positions frozen at zero
+ |
+ 74p  Tie tok_arc A=B (-1p)
+      Circular embedding (trained A/B ratio was 1.005)
+      High carry-mix training: 3/3 random seeds grok
       THIS IS THE CURRENT FROM-SCRATCH FRONTIER
 ```
 
@@ -201,6 +210,8 @@ These models all train from random initialization with no warm-starting. Every p
 | Vocab=10 + d_model=5 + parametric tok_emb | 133p | 100% | Massive combined compression works |
 | Shared norms + tied V/O + no correction | 78p | 100% | 3 norms CAN share weights (contradicts 170p finding) |
 | Freeze PLUS+EOS to zero (75p from scratch) | 75p | 100% | PLUS/EOS positions are zero; only EQUALS and z_hi need learning |
+| Tie tok_arc A=B (circular embedding) | 74p | 100% | Trained A/B ratio was 1.005; tying saves 1p with no risk |
+| High carry-mix (0.8) + step-based fade | 74p | 100%, 3/3 seeds | Carry-heavy training + smooth fade dramatically improves grok rate |
 | Warm-start cascade (75p→72p→...→62p) | 62p | 100% | Incremental freezing bypasses optimization barriers (not from-scratch) |
 | Tie tok_arc A=B (circular arc, warm-start) | 65p | 100% | Converges to A/B ratio 0.993 anyway |
 | Freeze EQUALS position (warm-start) | 63p | 100% | Warm-start preserves trained values in buffers |
@@ -250,6 +261,9 @@ These models all train from random initialization with no warm-starting. Every p
 | SAM hurts small models | New finding | Tested rho=0.05/0.01 across seeds; always worse than vanilla AdamW at 72p |
 | WD scheduling doesn't help | New finding | Scheduled, cyclical, warmup all equivalent to no adaptation; seed is the bottleneck |
 | Adaptive WD is optimal | Confirmed | Metric-triggered drops remain the best WD strategy |
+| High carry-mix + step fade is optimal training | **New finding** | cm=0.8 + step fade 10K→80K + 120K steps: 3/3 seeds grok at 74p (vs 1/10 at 75p with cm=0.3) |
+| Metric-based carry_mix fade fails at high cm | **New finding** | Creates oscillation feedback loop: accuracy↑ → carries removed → accuracy↓ → carries restored |
+| Shorter step budget improves stability | **New finding** | 120K steps (vs 400K/500K) gives steeper cosine LR decay; LR ~0.007 at grokking stabilization |
 | Grokking seeds are config-specific | **New finding** | 10-seed sweep: seeds that grok 75p fail 72p and vice versa. freeze_z_hi changes loss landscape topology, not just difficulty. |
 | "Flash grokking" occurs at small sizes | **New finding** | 75p s78779 hit 95.8% exact then crashed. Grokking basin is dynamically unstable for most seeds. |
 | Grok rate ~10-20% for random seeds | **New finding** | 10-seed sweep: ~2-4/10 seeds show grokking signals, ~1/10 approach 100%. Only s80085 works for both 75p and 72p. |
