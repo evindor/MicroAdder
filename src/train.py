@@ -705,12 +705,16 @@ def parse_args():
     p.add_argument("--pos-mode", default="learned", choices=["learned", "spiral_correct", "zero"])
     p.add_argument("--pos-correction-mode", default="full", choices=["full", "linear", "none"],
                    help="Position correction: 'full' (10 params) or 'linear' (2 params)")
-    p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos", "all"],
+    p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos", "plus_eos_equals", "all"],
                    help="Freeze special positions to zero: 'eos' saves 4p, 'plus_eos' saves 8p, 'all' saves 12p")
     p.add_argument("--freeze-z-hi", action="store_true", default=False,
                    help="Freeze z_hi carry position to zero (saves pos_dim params)")
     p.add_argument("--freeze-spiral", type=str, default="",
                    help="Comma-sep spiral params to freeze as buffers: amp,phase,slope,offset")
+    p.add_argument("--freeze-tok-arc", type=str, default="",
+                   help="Comma-sep tok_arc params to freeze as buffers: A,B,start,stride")
+    p.add_argument("--tie-tok-arc-ab", action="store_true", default=False,
+                   help="Tie tok_arc_A = tok_arc_B (circular arc, saves 1p)")
     p.add_argument("--alibi", action="store_true", default=False,
                    help="Add ALiBi attention bias with learned per-head slopes")
     p.add_argument("--qk-source", default="pos", choices=["pos", "tok"],
@@ -831,6 +835,8 @@ def main():
         freeze_special=args.freeze_special,
         freeze_z_hi=args.freeze_z_hi,
         freeze_spiral=args.freeze_spiral,
+        freeze_tok_arc=args.freeze_tok_arc,
+        tie_tok_arc_ab=args.tie_tok_arc_ab,
         alibi=args.alibi,
         qk_source=args.qk_source,
         tie_qk=args.tie_qk,

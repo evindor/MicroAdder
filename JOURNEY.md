@@ -463,10 +463,201 @@ RMSNorm (shared)         5
 TOTAL                   72
 ```
 
-### 75p seed 80085 — also GROKKING
-While 72p was converging, 75p with seed 80085 also started grokking:
-- Step 69K: 73.4% exact
-- Step 159K: 90.5% exact
-- Step 201K: 95.6% exact
-Confirms s80085 works for this architecture too.
+### 75p seed 80085 — also confirmed 100%
+- Hit 100% at step 276K, eval: 10010/10010
+- Stable at 100% through step 348K+
+
+### Failed sub-72p experiments
+- **Rank-1 q_proj (68p):** Dead at 20% tok_acc — 1D keys can't distinguish positions
+- **Scalar norm (68p):** Dead at 50-60% tok_acc — per-dim norm weights load-bearing
+- **d_model=4 (55p):** Dead at 21% tok_acc — pos_dim=2 too constraining
+- **Freeze all special (69p):** Dead at 0% exact, 56% tok_acc — EQUALS position essential
+
+### Breakthrough #8: 71p — freeze spiral_offset
+
+The spiral has 4 params: amp, phase, slope, offset. The 72p model learned:
+- spiral_offset = -0.341 (z-intercept, non-trivial)
+- spiral_slope = 0.081 (z-gradient, small)
+
+Freezing spiral_offset=0 (1 param) → 71p. Warm-started from 72p checkpoint.
+
+**71p (freeze_offset) grokking timeline:**
+- Step 30K: 26.9% exact (first signal from warm-start)
+- Step 177K: 97.5% exact
+- Step 252K: 97.6% exact (oscillating high)
+- Step 321K: **100.0% exact**
+- Step 330K: **100.0% exact**
+- Step 333K: **100.0% exact**
+
+Also tested: 71p (freeze_slope) hit 100% at step 288K — eval: 10010/10010!
+
+**71p submission created: `submission_71p/`**
+
+### Breakthrough #9: 70p — freeze spiral_offset + spiral_phase
+
+Key insight: spiral_phase is redundant because q_proj rotation can absorb any constant phase offset. So freeze both offset+phase.
+
+70p = 72p - spiral_offset(1) - spiral_phase(1). Warm-started from 72p.
+
+**70p grokking timeline:**
+- Step 192K: 95.2% exact
+- Step 354K: **100.0% exact**
+- Step 366K: **100.0% exact**
+- Step 378K: **100.0% exact**
+- Step 381K-390K: Stable at **100.0% exact**
+
+Best checkpoint at step 312K.
+
+**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
+
+Config: `--norm-mode shared --tie-vo --attn-out-rank 1 --no-ffn-bias --pos-correction-mode none --freeze-special plus_eos --freeze-z-hi --freeze-spiral offset,phase --tok-emb-mode parametric --vocab-size 10 --tie-qk --q-phase --warm-start <72p_best.pt>`
+
+**Submission created: `submission_70p/`**
+
+### 70p parameter breakdown
+```
+Component           Params
+tok_emb (arc)            4  (A, B, start, stride)
+spiral (2 of 4)          2  (amp, slope — phase+offset frozen)
+z_hi_pos              [0]  (frozen buffer)
+equals_pos               3  (EQUALS only; PLUS+EOS frozen)
+q_proj                  15  (3->5, full rank)
+out_proj (rank-1)       10  (5x1 + 1x5)
+q_phase                  1
+FFN fc1                 10  (5x2, no bias)
+FFN fc2                 10  (2x5, no bias)
+head_proj               10  (5->2, tied as v_proj)
+RMSNorm (shared)         5
+TOTAL                   70
+```
+
+### Failed sub-70p experiments
+- **69p no q_phase**: Dead at 21% tok_acc — q_phase rotation is essential for tied Q/K
+- **68p no q_phase + freeze_slope**: Dead at 20.7% tok_acc
+- **69p freeze_slope only (from 70p)**: Stuck at 64% tok_acc at 102K — killed
+
+### Breakthrough #10: 66p — freeze ALL spiral + tok_arc start+stride
+
+Implemented `--freeze-tok-arc` flag (same pattern as `--freeze-spiral`). Freezes parametric token embedding params at init values.
+
+66p = 70p - spiral_amp(1) - spiral_slope(1) - tok_arc_start(1) - tok_arc_stride(1). Warm-started from 70p.
+
+**66p grokking timeline:**
+- Step 33K: 36.1% exact (first signal from warm-start)
+- Step 36K: 99.7% exact (rapid ascent)
+- Steps 105K-132K: Multiple 100% hits (oscillating)
+- Step 162K: Crash to 6.9% (sharp oscillation)
+- Step 165K: Recovery to **100.0% exact**
+- Steps 165K-177K: Stable at **100.0% exact** (early-stopped)
+
+Best checkpoint at step 105K.
+
+**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
+
+Config: `--freeze-spiral amp,offset,phase,slope --freeze-tok-arc start,stride` (on top of 70p base config)
+
+**Submission created: `submission_66p/`**
+
+### 66p parameter breakdown
+```
+Component           Params
+tok_arc_A                1  (frozen: start, stride)
+tok_arc_B                1
+spiral                   0  (all 4 frozen as buffers)
+z_hi_pos              [0]  (frozen buffer)
+equals_pos               3  (EQUALS only; PLUS+EOS frozen)
+q_proj                  15  (3->5, full rank)
+out_proj (rank-1)       10  (5x1 + 1x5)
+q_phase                  1
+FFN fc1                 10  (5x2, no bias)
+FFN fc2                 10  (2x5, no bias)
+head_proj               10  (5->2, tied as v_proj)
+RMSNorm (shared)         5
+TOTAL                   66
+```
+
+### Also confirmed: 68p (freeze 3 spiral + tok_arc stride)
+- Warm from 70p, early-stopped at step 294K (100% held 12K steps)
+- Eval: 10010/10010
+
+### Failed: 64p (freeze ALL tok_arc params)
+- Stuck oscillating at 50-60% exact, 95% tok_acc for 150K+ steps
+- Without any learnable amplitude (A or B), digit embeddings are fixed circles — can't adapt spacing
+- Killed at step 258K
+
+### Breakthrough #11: 65p — tie tok_arc_A = tok_arc_B
+
+Implemented `--tie-tok-arc-ab` flag. Since the 66p model learned A=11.39 and B=11.47 (ratio 0.993), tying them to share a single parameter is nearly free.
+
+65p = 66p - 1 (tied A=B makes circular arc). Warm-started from 66p.
+
+**65p grokking timeline:**
+- Step 27K: 77.2% exact (fast warm-start)
+- Step 39K: 99.1% exact
+- Step 78K: **100.0% exact** (first hit)
+- Steps 156K-192K: Mostly stable at **100.0% exact** (early-stopped)
+
+Best checkpoint at step 78K.
+
+**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
+
+**Submission created: `submission_65p/`**
+
+### Breakthrough #12: 63p — freeze EQUALS position
+
+Implemented `freeze_special="plus_eos_equals"` option. The 66p model learned equals_pos=[1.93, -1.56, 0.03] — a strong non-zero position. By freezing it as a buffer and warm-starting, it retains the trained values without using learnable parameters.
+
+63p = 66p - 3 (equals_pos frozen as buffer). Warm-started from 66p.
+
+**63p grokking timeline:**
+- Step 12K: 80.2% exact
+- Step 84K: 99.6% exact
+- Step 123K: **100.0% exact** (first hit)
+- Steps 147K-159K: Stable at **100.0% exact** (early-stopped)
+
+Best checkpoint at step 123K.
+
+**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
+
+**Submission created: `submission_63p/`**
+
+### Breakthrough #13: 62p — tie A=B AND freeze EQUALS
+
+The combined approach: tie_tok_arc_ab + freeze_special=plus_eos_equals.
+
+62p = 66p - 1 (tie A=B) - 3 (freeze equals_pos) = 62 learnable params. Warm-started from 66p.
+
+**62p grokking timeline:**
+- Step 21K: 96.5% exact (very early signal)
+- Step 96K: **100.0% exact** (first hit, saved as best checkpoint)
+- Steps 96K-204K: Oscillating but frequently at 100%
+- Step 192K-204K: Stable at **100.0% exact** (early-stopped)
+
+Best checkpoint at step 96K.
+
+**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
+
+**Submission created: `submission_62p/`**
+
+### 62p parameter breakdown
+```
+Component           Params
+tok_arc_A (=B)           1  (circular arc, all others frozen)
+q_phase                  1  (Q rotation angle)
+q_proj                  15  (3->5, full rank)
+out_proj (rank-1)       10  (5x1 + 1x5)
+FFN fc1                 10  (5x2, no bias)
+FFN fc2                 10  (2x5, no bias)
+head_proj               10  (5->2, tied as v_proj)
+RMSNorm (shared)         5
+TOTAL                   62
+
+Frozen buffers (loaded from warm-start):
+tok_arc_start           1  (angle offset)
+tok_arc_stride          1  (angle per digit)
+spiral_amp/phase/slope/offset  4  (all spiral params)
+special_pos_equals      3  (EQUALS token position)
+z_hi_pos                3  (carry position)
+_plus_pos, _eos_pos     6  (zero vectors)
+```
 

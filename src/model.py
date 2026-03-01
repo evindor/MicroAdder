@@ -54,6 +54,8 @@ class ModelConfig:
     freeze_pad: bool = False        # Freeze PAD token embedding to zero (saves tok_dim params)
     freeze_z_hi: bool = False       # Freeze z_hi carry position to zero (saves pos_dim params)
     freeze_spiral: str = ""         # Comma-separated spiral params to freeze: "slope,offset" etc
+    freeze_tok_arc: str = ""        # Comma-separated arc params to freeze: "start,stride" etc
+    tie_tok_arc_ab: bool = False    # Tie tok_arc_A = tok_arc_B (circular, saves 1p)
     q_proj_rank: int = 0            # 0 = full rank q_proj; >0 = low-rank factorization (saves params)
     softmax1: bool = False          # Use softmax1 (add 1 to denominator, allows attn sum < 1)
     attn_mode: str = "split"        # "split" | "offset" | "hard_offset"
@@ -549,10 +551,15 @@ class MicroAdder(nn.Module):
             # emb[d] = [A * cos(start + d * stride), B * sin(start + d * stride)]
             # 4 params for 10+ digits, instead of 20+ learned
             assert cfg.tok_dim == 2, "Parametric tok_emb only supports tok_dim=2"
-            self.tok_arc_A = nn.Parameter(torch.tensor(2.5))  # amplitude dim 0
-            self.tok_arc_B = nn.Parameter(torch.tensor(2.5))  # amplitude dim 1
-            self.tok_arc_start = nn.Parameter(torch.tensor(-1.2))  # start angle (~-71°)
-            self.tok_arc_stride = nn.Parameter(torch.tensor(0.29))  # angle per digit (~16.6°)
+            frozen_arc = set(cfg.freeze_tok_arc.split(",")) if cfg.freeze_tok_arc else set()
+            for name, init_val in [("A", 2.5), ("B", 2.5), ("start", -1.2), ("stride", 0.29)]:
+                if name in frozen_arc:
+                    self.register_buffer(f"tok_arc_{name}", torch.tensor(init_val))
+                else:
+                    setattr(self, f"tok_arc_{name}", nn.Parameter(torch.tensor(init_val)))
+            if cfg.tie_tok_arc_ab and "B" not in frozen_arc and "A" not in frozen_arc:
+                # Share A and B parameters (circular arc)
+                self.tok_arc_B = self.tok_arc_A
             # No nn.Embedding — embeddings computed on the fly from arc params
         elif cfg.freeze_pad:
             # Learnable embeddings for tokens 0..vocab_size-2; PAD (last) is frozen zero
@@ -680,6 +687,11 @@ class MicroAdder(nn.Module):
             elif cfg.freeze_special == "all":
                 # All special positions fixed to zero (saves all special_pos params)
                 self.register_buffer("_frozen_special", torch.zeros(3, cfg.pos_dim))
+            elif cfg.freeze_special == "plus_eos_equals":
+                # All frozen as buffers (keeps key names for warm-start compatibility)
+                self.register_buffer("special_pos_equals", torch.zeros(1, cfg.pos_dim))
+                self.register_buffer("_plus_pos", torch.zeros(1, cfg.pos_dim))
+                self.register_buffer("_eos_pos", torch.zeros(1, cfg.pos_dim))
             else:
                 raise ValueError(f"Unknown freeze_special: {cfg.freeze_special}")
 
@@ -692,7 +704,7 @@ class MicroAdder(nn.Module):
             return self.special_pos
         elif cfg.freeze_special == "eos":
             return torch.cat([self.special_pos_learned, self._eos_pos], dim=0)
-        elif cfg.freeze_special == "plus_eos":
+        elif cfg.freeze_special in ("plus_eos", "plus_eos_equals"):
             return torch.cat([self._plus_pos, self.special_pos_equals, self._eos_pos], dim=0)
         else:  # all
             return self._frozen_special
