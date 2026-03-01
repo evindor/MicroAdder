@@ -87,19 +87,25 @@ def decode_answer(tokens: List[int], vocab_size: int = 14) -> int:
     return result
 
 
-def make_example(a: int, b: int, vocab_size: int = 14) -> Tuple[List[int], List[int]]:
-    """Create (input_ids, targets) pair for a + b.
+def make_example(a: int, b: int, vocab_size: int = 14, task: str = "addition") -> Tuple[List[int], List[int]]:
+    """Create (input_ids, targets) pair for a + b or a - b.
 
     input_ids:  tokens[0:33]  (teacher-forced input)
     targets:    tokens[1:34]  with -100 mask on prompt positions
 
     vocab_size: 14 (default), 12 (merge PLUS/EQUALS), or 10 (all specials → 0)
+    task: "addition" (a + b) or "subtraction" (a - b, requires a >= b)
     """
     tids = get_token_ids(vocab_size)
-    s = a + b
+    if task == "subtraction":
+        assert a >= b, f"Subtraction requires a >= b, got {a} - {b}"
+        s = a - b
+    else:
+        s = a + b
     x = encode_number(a, MAX_DIGITS)
     y = encode_number(b, MAX_DIGITS)
     z = encode_number(s, ANSWER_LEN)
+    # Operator token: PLUS and MINUS share the same token ID (distinguished by position)
     tokens = x + [tids["PLUS"]] + y + [tids["EQUALS"]] + z + [tids["EOS"]]
     assert len(tokens) == SEQ_LEN
 
@@ -118,8 +124,9 @@ def sample_batch(
     device: torch.device,
     carry_mix: float = 0.0,
     vocab_size: int = 14,
+    task: str = "addition",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Sample a batch of addition examples.
+    """Sample a batch of addition or subtraction examples.
 
     Returns (input_ids, targets), both shape (batch_size, 33).
     """
@@ -128,12 +135,15 @@ def sample_batch(
     min_val = 10 ** (min_digits - 1) if min_digits > 1 else 0
 
     for _ in range(batch_size):
-        if carry_mix > 0 and rng.random() < carry_mix:
+        if task == "subtraction":
+            a = rng.randint(min_val, max_val)
+            b = rng.randint(0, a)  # b <= a so result is non-negative
+        elif carry_mix > 0 and rng.random() < carry_mix:
             a, b = _sample_carry_example(min_digits, max_digits, rng)
         else:
             a = rng.randint(min_val, max_val)
             b = rng.randint(min_val, max_val)
-        inp, tgt = make_example(a, b, vocab_size=vocab_size)
+        inp, tgt = make_example(a, b, vocab_size=vocab_size, task=task)
         inputs.append(inp)
         targets.append(tgt)
 

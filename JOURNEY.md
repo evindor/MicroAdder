@@ -1,458 +1,127 @@
-# Research Journey: Path to Sub-100p
+# Research Journey: Minimizing a 10-Digit Addition Transformer
 
-## Session 1 — 2026-03-01
+## Overview
+
+This document traces the path from a 170-parameter single-layer decoder that solves 10-digit addition with 100% accuracy (10010/10010 on the AdderBoard test set) down to a **75-parameter model trained from scratch** that achieves the same perfect accuracy.
+
+The journey spans six research sessions covering architecture compression, training dynamics, seed sensitivity, and several failed approaches (scaffold training, SAM, WD scheduling) that produced important negative results. The legitimate from-scratch frontier is **75 parameters** (seed 80085). Models below 75p relied on warm-starting with frozen learned values -- an interesting research direction documented here, but not a true from-scratch result.
+
+---
+
+## Session 1: Architecture Exploration (170p to 133p)
 
 ### Starting Point
-- **Current SOTA:** 170p, 100% accuracy (seed 80085)
-- **Architecture:** 1L decoder, d_model=6 (tok_dim=2, pos_dim=4), 2h, hd=3, ff=2
-- **Target:** Sub-100p trained model, 100% on 10-digit addition
+
+- **Baseline:** 170p, 100% accuracy, seed 80085
+- **Architecture:** 1-layer decoder, d_model=6 (tok_dim=2, pos_dim=4), 2 heads, head_dim=3, ffn_dim=2
+- **Target:** Sub-100p model, 100% on 10-digit addition
 
 ### Research Plan
 
-After deep study of RESEARCH.md and structural_analysis.md, three experiments:
+Three experiments motivated by structural analysis of the trained 170p model:
 
-#### Exp A: Vocab=10 → 162p (conservative) or 154p (freeze=all)
-- PLUS/EQUALS/EOS/PAD all become digit-0, distinguished by position only
-- Structural analysis confirms: attention is purely positional routing, model never needs token identity for delimiters
-- PLUS and digit-1 are dangerously close (1.8° apart) — removing PLUS from vocab eliminates the collision
-- Risk: V(delimiter) = V(digit-0), but split-subspace already routes via position not token content
-- **Savings:** tok_emb 14×2→10×2 = -8p. Freeze all special_pos = -8p more.
+**Exp A: Vocab reduction (14 to 10).** The model's attention is purely positional -- it never uses token identity for delimiters. PLUS/EQUALS/EOS/PAD can all map to digit-0, distinguished by position alone. Saves 8p from embeddings.
 
-#### Exp B: Fixed-Offset Attention → saves ~16p (from 26 to 10)
-- Replace q_proj(24p) + q_phase(2p) with ~10 learnable offset parameters
-- Based on structural analysis: Head 0 = look-ahead (X_{i+2}, Y_{i+1}), Head 1 = current (X_{i+1}, Y_i, self)
-- These are just fixed relative offsets! The 26p Q/K machinery learns a simple offset function.
-- Implementation: OffsetAttention with per-head (x_offset, y_offset, sharpness, self_weight, special_weight) = 10p total
-- Risk: The model might need more flexible attention patterns during training even if it converges to fixed offsets
-- **Savings:** q_proj(24p) + q_phase(2p) → offset params(10p) = -16p
+**Exp B: Fixed-offset attention.** The learned Q/K machinery computes simple positional offsets (Head 0: look-ahead at X_{i+2}/Y_{i+1}; Head 1: current X_{i+1}/Y_i/self). Replace 26p of Q/K params with 10p of explicit offset parameters.
 
-#### Exp C: Stack Everything → target sub-100p
-- Vocab=10 + Offset Attention + freeze_special=all on d_model=6
-- Count: 170 - 8(tok_emb) - 8(special_pos) - 16(offset_attn) = 138p
-- Then try d_model=5 or parametric embeddings for further cuts
+**Exp C: Stack everything.** Combine vocab=10 + offset attention + freeze_special to reach sub-140p, then explore d_model=5.
 
-### Implementation Status
+### Results
 
-#### Vocab=10 — IMPLEMENTED ✓
-- `data.py`: `get_token_ids(vocab_size)` maps special tokens to digit-0
-- `make_example()`, `sample_batch()`, `decode_answer()` all take `vocab_size` parameter
-- `model.py`: `--vocab-size 10/12/14` flag, `--freeze-special all` option added
-- Parameter count confirmed: 162p (freeze=eos), 154p (freeze=all)
+**Vocab=10 on d_model=6: FAILED.** All runs (162p, 154p, 136p) stalled at ~70% token accuracy without grokking. The shared "0" token for digits and special tokens confused the value pathway at d_model=6. This was a dead end for the original architecture.
 
-**Training runs launched (3 parallel, max GPU):**
-1. `sub100_v10_feos_s80085` — vocab=10, freeze=eos, seed 80085 (162p)
-2. `sub100_v10_fall_s80085` — vocab=10, freeze=all, seed 80085 (154p)
-3. `sub100_v10_feos_s42` — vocab=10, freeze=eos, seed 42 (162p)
+**d_model=5, 1-head: NEAR-GROKKING.** A parallel experiment with d_model=5, 1 head, head_dim=5 (141p, vocab=14) showed slow but genuine grokking -- 14.6% exact match at 201K steps with s42, still climbing. This became the key architectural insight.
 
-Status at ~36K steps: tok_acc 0.51-0.59, no grokking yet. Need to be patient — the 170p baseline grokked at ~15K with seed 80085 but vocab change may alter the grokking dynamics.
+### Key Discovery: 1 Head > 2 Heads
 
-#### Fixed-Offset Attention — IMPLEMENTED ✓
-- `OffsetAttention` class in model.py: `--attn-mode offset`
-- Per-head parameters: x_offset(2), y_offset(2), sharpness(2), self_weight(2), special_weight(2) = 10p total
-- Replaces q_proj(24p) + q_phase(2p) = 26p → saves 16p
-- With vocab=10 + offset + freeze=eos: 146p
-- With vocab=10 + offset + freeze=all: 138p
-- Forward pass and generation tested and working
-- **Waiting for GPU slot** to launch training (3 runs already active)
+One head with head_dim=5 (full d_model rank) is more expressive than two heads with head_dim=3 each. The single head has a 5D key space, trading dual-head routing for a richer representation. This architectural change unlocked the entire compression path.
 
-### Key Observations
+---
 
-1. The model's attention is remarkably simple — just fixed positional offsets. The 26p Q/K is massive overhead for what amounts to "look at position i+2 in X and i+1 in Y".
+## Session 2: Breaking Through to Sub-100p (141p to 78p)
 
-2. The offset attention initialization matters. I initialized x_offset/y_offset to match the discovered patterns (Head0: +2/+1, Head1: +1/0). This gives the model a head start.
+### 141p: d5h1 Groks (seed 42)
 
-3. For vocab=10, the 12-token answer sequence now ends with a "0" (was EOS=12) which the model needs to predict. Since we always generate exactly 12 tokens and decode exactly 11 answer digits, this should be fine — the last "0" is just a dummy prediction at the EOS position.
+The resumed d5h1 run (`sub100_d5h1_s42_lowwd`, 141p) grokked at step 243K of the resumed training:
 
-### Results: Vocab=10 (d_model=6, 162p) — FAILED
+- 0-108K: Slow climb, 87% tok_acc, ~15-27% exact
+- 108K-111K: **Grokking onset** -- 27% to 84% exact in 3K steps
+- 243K: **100.0% exact** (10010/10010)
 
-All vocab=10 runs on the original d_model=6 architecture failed to grok:
-- `v10_feos_s80085` (162p): 90K steps, tok_acc=0.70, val_exact=0.003 — no grokking
-- `v10_feos_lowwd` (162p): 117K steps, tok_acc=0.69, val_exact=0.002 — stagnant
-- `v10_aggressivewd` (162p): 48K steps, tok_acc=0.51 — early stages but declining
-- `v10_fall` (154p): stuck at 54% tok_acc — freeze_all too aggressive
-- `hardoff2_v10` (136p): 54K steps, tok_acc=0.24 — hard_offset dead on d6
+The model needed ~200K steps of regular training to develop the carry circuit, followed by aggressive WD reduction to sharpen it. Seed sensitivity was already apparent: s80085 plateaued at 9% exact on the same architecture.
 
-**Conclusion:** Vocab=10 on d_model=6 significantly slows grokking. The model reaches ~70% tok_acc but can't break through to grokking. The shared "0" token for digits + special tokens may confuse the value pathway.
+### 133p: Vocab=10 Works at d5h1
 
-### Key Discovery: d_model=5, 1-head (141p) — NEAR GROKKING
+Despite failing at d_model=6, vocab=10 worked perfectly at d5h1 -- and grokked even faster:
 
-Previous experiment `sub100_exp3_d5h1_141p` shows d5h1 is remarkably capable:
-- **d5h1 s42 (141p, vocab=14)**: 201K steps, **14.6% exact, 87.4% tok_acc** — climbing!
-- **d5h1 s80085 wd10 (141p)**: 96K steps, 90.8% tok_acc, 8.2% exact — WD Stage 1 fired
-- The architecture: d_model=5, tok_dim=2, pos_dim=3, 1 head, head_dim=5, tied Q/K+q-phase, rank-2 out_proj
+- `sub100_d5h1_v10_s80085` (133p): Grokking at 15K steps, 100% at 30K
+- Seed 80085 grokked here despite failing on 141p (vocab=14)
 
-These models are on the cusp of grokking — ~90% tok_acc with rising exact match. The 170p model grokked sharply, but d5h1 shows a slow, gradual increase in exact match.
+The aggressive WD thresholds fire earlier with vocab=10 since the model starts generalizing at lower exact-match levels.
 
-**Parameter savings path from d5h1 (141p):**
-| Config | Params |
-|--------|--------|
-| d5h1 baseline | 141p |
-| + vocab=10 | 133p |
-| + freeze_all | 127p |
-| + parametric tok_emb | 111p |
-| + offset attn | 105p |
+### 100p: The Parametric Compression Stack
 
-If d5h1 can grok to 100%, all these variants become viable paths to sub-100p!
+**`sub100_d5h1_100p_s42`**: d5h1 + vocab=10 + parametric tok_emb + rank-1 out_proj + no FFN bias = **100 parameters, 100% accuracy.**
 
-## Session 2 — 2026-03-01 (continued)
+- Grokking onset at 30K, 100% at 84K (10010/10010)
 
-### Active Experiments: Pushing d5h1 to grok
+Six innovations stacked:
+1. **d_model=5** (from 6): Saves 29p across all layers
+2. **1 head, head_dim=5**: Full-rank attention in a single head
+3. **vocab=10**: Special tokens map to digit-0 (saves 8p)
+4. **Parametric tok_emb**: 4 arc parameters instead of 20 learned embeddings (saves 16p)
+5. **Rank-1 out_proj**: 10p instead of 20p (saves 10p)
+6. **No FFN bias**: Saves 7p
 
-Launched 3 runs to break the d5h1 plateau:
+### 80p: Shared Norms + Tied V/Output
 
-1. **`sub100_d5h1_resume_lowwd_s80085`** — Resume from d5h1 wd10 s80085 (96K checkpoint, 90.8% tok_acc). Ultra-aggressive WD: Stage1 at val_exact>0.01, Stage2 at val_exact>0.05, tok_acc gate>0.5.
-   - Status at 30K (from resume): 91.9% tok_acc, 8.9% exact. WD dropped to 1e-4 at step 9K. **Plateauing.**
+Two structural insights yielded another 20p savings:
 
-2. **`sub100_d5h1_s42_lowwd`** — Resume from d5h1 s42 (201K checkpoint, 14.6% exact). Same aggressive WD.
-   - Status at 30K (from resume): 87.5% tok_acc, **15.4% exact** — still climbing! Best exact match so far.
+- **Shared norms** (`norm_mode="shared"`): All 3 RMSNorm weight vectors share one 5D vector (5p vs 15p)
+- **Tied V/output** (`tie_vo`): v_proj.weight = head_proj.weight^T -- both map between tok_dim and d_model (saves 10p)
 
-3. **`sub100_d5h1_nowd_s80085`** — Fresh d5h1 with constant WD=0.0001. Testing if the model can learn with near-zero WD throughout.
-   - Status at 30K: 24.7% tok_acc — very slow, needs WD for early training.
+`sub100_d5h1_80p_s42`: Grokking onset at 111K (later than 100p, heavy oscillation), stabilized at 100% by 240K. 10010/10010.
 
-### Observations
+Despite analysis showing these weight matrices were NOT naturally similar in the 100p model (cosine sim = -0.30), the 80p model found a joint solution. tie_vo acts as beneficial regularization.
 
-1. **d5h1 IS slowly grokking** — s42_lowwd shows steadily increasing exact match (7% → 15.4% over 30K steps from resume). This is a genuine grokking curve, just very gradual.
+### 78p: Position Correction is Unnecessary
 
-2. **WD=0.0001 from scratch fails** — The model needs regularization during the memorization phase. The constant low-WD approach doesn't work; you need adaptive WD that starts high and drops.
+Removing pos_corr_slope and pos_corr_intercept (2p): the spiral_amp parameter can absorb the constant scaling factor.
 
-3. **s80085 plateaus at ~9% exact while s42 climbs past 15%** — Seed matters a lot at d5h1. The s42 seed found a better basin.
+`sub100_d5h1_78p_s42`: Grokked at 414K, 10010/10010. **78 parameters from scratch.**
 
-4. **The carry circuit at d_model=5 is more compressed** — With pos_dim=3 (vs 4 at d_model=6), the positional encoding has less room. The FFN sees 5-dim input instead of 6-dim. This may require more training steps to develop the same carry-propagation circuit.
+### 75p: The From-Scratch Frontier
 
-### BREAKTHROUGH: d5h1 141p GROKKED TO 100%! ✓
+75p = 78p minus the 3 learned EQUALS position parameters (EQUALS frozen to zero). This is the minimal configuration that groks from scratch.
 
-**Step 243K: 100.0% exact match (5000 samples)**
-**Full eval: 10010/10010 correct on AdderBoard test set!**
+- **Seed 80085**: 100% at 276K, 10010/10010
+- **Seed 42**: Dead from scratch (28% tok_acc at 435K)
 
-The `sub100_d5h1_s42_lowwd` run (resumed from 201K-step checkpoint with aggressive WD) grokked!
+### Results Summary: From-Scratch Models
 
-Training trajectory (from resume):
-- 0-100K: ~87% tok_acc, ~15-27% exact — slow climb, WD dropped to 1e-4 at step 9K
-- 108K: 27.3% exact → 111K: **83.9% exact** — GROKKING ONSET (3K steps!)
-- 126K: **97.3% exact** — nearly perfect
-- 165K: **99.4% exact**
-- 243K: **100.0% exact** — FULLY GROKKED
+| Params | Architecture delta | Seeds tried | Best from-scratch result |
+|--------|-------------------|-------------|--------------------------|
+| 170p | Baseline d6h2 | 80085 | 100% (15K grok) |
+| 141p | d5h1, vocab=14 | 42, 80085 | 100% s42 (243K grok) |
+| 133p | + vocab=10 | 80085 | 100% (15K grok) |
+| 100p | + parametric + rank-1 + no bias | 42 | 100% (84K grok) |
+| 90p | + shared norms | 80085 | 100% (48K grok) |
+| 80p | + tie_vo | 42 | 100% (240K grok) |
+| 78p | + no pos correction | 42 | 100% (414K grok) |
+| **75p** | **+ freeze PLUS/EOS** | **80085** | **100% (276K grok)** |
+| 70p | + freeze spiral(offset,phase) | 80085 | 36% tok_acc -- FAILED |
+| 66p | + freeze all spiral + tok_arc | 80085 | 25% tok_acc -- FAILED |
 
-The model oscillated significantly between 77-100% after the grokking onset, but ultimately stabilized.
+**Below 75p, no seed has been found that groks from scratch.** The 70p and 66p configurations fail even with s80085.
 
-**Submission created: `submission_141p/`**
-- 141p, 100% accuracy, verified on 10010 samples
-- Architecture: d_model=5, tok_dim=2, pos_dim=3, 1 head, head_dim=5, ff=2
-- Config: tied Q/K + q-phase, rank-2 out_proj, spiral+linear correction positions, freeze_special=eos
+### 75p Parameter Breakdown
 
-### Analysis: Why d5h1 works
-
-1. **1 head with head_dim=5 > 2 heads with head_dim=3**: The single head has full d_model-dimensional key space (5D), giving it more expressive power per head than the 2-head design (3D keys each). It sacrifices the dual-head routing (lookahead + current) for a richer single representation.
-
-2. **Seed sensitivity**: Only s42 grokked. s80085 plateaued at 9% exact despite 90.8% tok_acc. This suggests the grokking basin is narrow at 141p — the model barely has enough capacity, and the initial weights must land near the right basin.
-
-3. **Resume + aggressive WD is the key**: The model needed ~200K steps of regular training to develop the carry circuit, followed by aggressive WD reduction (Stage 2 at val_exact=0.05) to sharpen it. This two-phase approach was critical.
-
-### Next Goal: Sub-100p
-
-From 141p, the savings path:
-| Change | Params saved | New total |
-|--------|-------------|-----------|
-| vocab=10 | 8p | 133p |
-| + freeze_all | 6p | 127p |
-| + parametric tok_emb | 16p | 111p |
-| + offset attn (replace q_proj+q_phase) | 6p | 105p |
-
-All these features are already implemented! But we need to verify they can grok at d5h1.
-
-### BREAKTHROUGH #2: d5h1 + vocab=10 = 133p, GROKKED AT 15K STEPS!
-
-The `sub100_d5h1_v10_s80085` run grokked incredibly fast:
-- Step 12K: 5.2% exact, 79.0% tok_acc
-- Step 15K: **85.5% exact** — instant grokking!
-- Step 30K: **100.0% exact** — FULLY GROKKED
-- Full eval: **10010/10010 correct on AdderBoard!**
-
-This is remarkable:
-1. **vocab=10 works at d5h1!** Despite failing on d_model=6, it works perfectly on d5h1.
-2. **Grokking was FASTER than baseline** — 15K steps vs 170p's 15K steps, but at 133p!
-3. **Seed 80085 grokked this time** (while it plateaued at 141p vocab=14)
-
-The difference is likely that the aggressive WD thresholds (Stage 2 at val_exact=0.05) fire earlier with vocab=10 since the model starts generalizing at lower exact match levels.
-
-**Submission created: `submission_133p/`**
-
-### Next Experiments Targeting Sub-100p
-
-From 133p, remaining savings:
-- freeze_all (127p) — FAILED (dead at d5h1)
-- parametric tok_emb (117p) — not yet tested at d5h1
-- offset attn (needs fixing for n_heads=1)
-
-The freeze_all failure is concerning — it means we can't eliminate special_pos (6p).
-So the realistic target is: 133p - 16p(parametric) = 117p. Maybe offset attn saves a few more → ~111p.
-
-### BREAKTHROUGH #3: 100 PARAMETERS, 100% ACCURACY!!!
-
-**`sub100_d5h1_100p_s42`**: d5h1 + vocab=10 + parametric tok_emb + rank-1 out_proj + no FFN bias
-
-- **100 parameters total**
-- Step 30K: 80.2% exact — early grokking
-- Step 36K: **98.5% exact** — massive jump
-- Step 84K: **100.0% exact** (5K samples)
-- **Full eval: 10010/10010 on AdderBoard!**
-
-Parameter breakdown (100p):
-```
-tok_arc_A/B/start/stride: 4 (parametric embedding)
-spiral_amp/phase/slope/offset: 4
-pos_corr_slope/intercept: 2
-z_hi_pos: 3
-special_pos_learned: 6 (PLUS, EQUALS)
-ln1/ln2/ln_f weights: 15 (3×5)
-q_proj: 15 (3→5)
-q_phase: 1
-v_proj: 10 (2→5)
-out_proj: 10 (rank-1: 5+5)
-ffn_fc1: 10 (5→2, no bias)
-ffn_fc2: 10 (2→5, no bias)
-head_proj: 10 (5→2)
-```
-
-Key innovations stacked:
-1. d_model=5 (from 6): Saves 29p across all layers
-2. 1 head, head_dim=5: Full-rank attention in a single head
-3. vocab=10: Special tokens → digit-0 (saves 8p)
-4. Parametric tok_emb: 4 arc params instead of 20 learned (saves 16p)
-5. Rank-1 out_proj: 10p instead of 20p (saves 10p)
-6. No FFN bias: Saves 7p (fc1_bias=2, fc2_bias=5)
-
-**Submission created: `submission_100p/`**
-
-### Continuing: Can we go below 100p?
-
-Remaining savings:
-- freeze_all special positions: saves 6p → 94p (failed before but worth retrying)
-- Remove q_phase (1p) → 99p (marginal)
-- Shared norms (save 10p) → 90p
-
-The target is now to explore how much further we can push.
-
-### 94p (freeze_all) — FAILED
-
-Launched `sub100_d5h1_94p_s42` with freeze_special="all" (all special positions frozen to zero).
-After 93K steps: 0% exact, 26.7% tok_acc — completely dead. Same failure mode as all prior freeze_all attempts.
-
-**Conclusion: Special position embeddings (PLUS, EQUALS) are load-bearing. They cannot be frozen.**
-
-### Sub-100p Strategy: New Parameter Savings
-
-Analyzed the 100p parameter budget and identified two new structural savings:
-
-1. **Shared norms (norm_mode="shared")**: All 3 RMSNorm weight vectors (5 params each = 15p total) share one vector → 5p. Saves 10p.
-
-2. **Tied V/output (tie_vo)**: `v_proj.weight` (5×2) and `head_proj.weight` (2×5) are transposes — both map between tok_dim and d_model. Tying them saves 10p. Implemented by removing v_proj and using `head_proj.weight` directly in the attention forward pass: `v = x_tok @ head_proj.weight` instead of `v = v_proj(x_tok)`.
-
-Parameter configurations:
-| Config | Params |
-|--------|--------|
-| 100p baseline (current) | 100p |
-| + shared norms | 90p |
-| + shared norms + no q_phase | 89p |
-| + fixed norms (no norm weights) | 85p |
-| + shared norms + tie_vo | 80p |
-| + fixed norms + tie_vo | 75p |
-| + shared + tie_vo + no q_phase | 79p |
-
-### BREAKTHROUGH #4: 80 PARAMETERS, 100% ACCURACY!!!
-
-**`sub100_d5h1_80p_s42`**: d5h1 + vocab=10 + parametric tok_emb + rank-1 out_proj + no FFN bias + shared norms + tie_vo
-
-- **80 parameters total**
-- Step 111K: Grokking onset (0% → 10.5% exact in 3K steps)
-- Heavy post-grokking oscillation (11-94% exact) — classic pattern
-- Step 240K: **100.0% exact** (5K samples) — first stable peak
-- **Full eval: 10010/10010 on AdderBoard!**
-
-Parameter breakdown (80p):
-```
-tok_arc_A/B/start/stride: 4     (parametric embedding)
-spiral_amp/phase/slope/offset: 4 (spiral positions)
-pos_corr_slope/intercept: 2     (correction)
-z_hi_pos: 3                     (carry position)
-special_pos_learned: 6          (PLUS=3, EQUALS=3)
-shared_norm_weight: 5           (ONE vector shared by ln1, ln2, ln_f)
-q_proj: 15                      (3→5, no bias)
-q_phase: 1                      (angle)
-out_proj: 10                    (rank-1: 5+5)
-ffn_fc1: 10                     (5→2, no bias)
-ffn_fc2: 10                     (2→5, no bias)
-head_proj: 10                   (5→2, no bias, also used as v_proj)
-Total: 80
-```
-
-Key innovations on top of 100p:
-1. **Shared norms**: All 3 RMSNorm weight vectors share one parameter vector (5p vs 15p)
-2. **Tied V/output (tie_vo)**: v_proj.weight = head_proj.weight.T, so `v = x_tok @ head_proj.weight`. Both map between tok_dim and d_model. Saves 10p.
-
-Observations:
-- Despite the analysis showing v_proj and head_proj.T are NOT naturally similar in the 100p model (cosine sim = -0.30), the 80p model found a solution where a single weight matrix works for both roles!
-- Despite norms being dissimilar in the 100p model, the shared norm constraint doesn't prevent grokking
-- The grokking onset was later (111K vs 30K for 100p) and oscillation was heavier, but the model ultimately converged
-
-**Submission created: `submission_80p/`**
-
-### 90p s42 — FAILED (500K steps, 7.5% exact plateau)
-
-The `sub100_d5h1_90p_s42` run hit the 500K step limit without grokking. Stuck at 7.5% exact, 90% tok_acc. The shared norm constraint without tie_vo is harder to grok at seed 42.
-
-### BREAKTHROUGH #5: 90p s80085 — GROKKED AT 48K STEPS!
-
-Different seed makes all the difference. `sub100_d5h1_90p_s80085`:
-- Step 48K: **100% exact** (first hit, but 10009/10010 on full eval — 1 error)
-- Step 153K: **100% exact** (stable, 10010/10010 on full eval confirmed!)
-
-90p breakdown: Same as 80p but with independent v_proj (10p extra, no tie_vo).
-
-**Key insight:** Seed 80085 groks 90p incredibly fast (48K vs 500K for s42 failing). Meanwhile, s42 groks 80p fast but s42 fails on 90p. The tie_vo constraint acts as regularization that changes which seeds work!
-
-**Submission created: `submission_90p/`**
-
-### 75p (fixed norms + tie_vo) experiments
-
-1. **75p from scratch s42**: Dead — 435K steps, 0% exact, 28.5% tok_acc
-2. **75p warm-started s42**: 435K steps, 9.4% exact, 92.1% tok_acc — plateau
-3. **75p from scratch s80085**: Not yet tried
-
-The fixed norms constraint is very aggressive — the shared norm weight in the 80p model has values [-1.8, 3.8, 1.8, 2.0, 6.0], far from all-ones. This per-dimension scaling is doing real computational work.
-
-### Active Experiments (Session 3 continued)
-
-1. **`sub100_d5h1_80p_s80085`** — 80p with seed 80085 (to see if this seed also works for 80p)
-2. **`sub100_d5h1_70p_s42`** — 70p: shared norms + tie_vo + **ffn_dim=1** (saves 10p from 80p)
-3. **`sub100_d5h1_75p_warm_s42`** — 75p warm-started from 80p, still running
-
-The 70p experiment is radical: the FFN bottleneck is reduced from 2 to 1. The MLP becomes a rank-1 "carry score" computer: project to scalar, GELU, project back. If it works, it would suggest the carry function can be computed by a single threshold.
-
-### Comprehensive results table
-
-| Config | Params | Seeds tried | Best result | Status |
-|--------|--------|-------------|-------------|--------|
-| d6h2 baseline | 170p | 80085 | 100% | GROKKED |
-| d5h1 | 141p | 42 | 100% | GROKKED |
-| d5h1 + vocab=10 | 133p | 80085 | 100% | GROKKED |
-| d5h1 + vocab=10 + param + rank2 | 117p | 42 | 46% (500K) | PLATEAU |
-| d5h1 + vocab=10 + param + rank1 + no bias | 100p | 42 | 100% | GROKKED |
-| d5h1 + vocab=10 + param + rank1 + no bias + freeze_all | 94p | 42 | 0% (93K) | FAILED |
-| 100p + shared norms | 90p | 42, 80085 | 100% (s80085) | GROKKED |
-| 100p + shared norms + tie_vo | 80p | 42, 80085 | 100% (s42) | GROKKED |
-| 80p + no pos correction | 78p | 42 | 100% | GROKKED |
-| 80p + fixed norms | 75p | 42, 42(warm) | 9.4% (warm) | PLATEAU |
-| 80p + ffn_dim=1 | 70p | 42, 80085 | 60% tok (s42) | FAILED |
-
-### BREAKTHROUGH #6: 78 PARAMETERS, 100% ACCURACY!!!
-
-**`sub100_d5h1_78p_s42`**: Same as 80p but WITHOUT position correction parameters (pos_corr_slope, pos_corr_intercept removed). 78 total params.
-
-- Step 156K: 8.6% exact — grokking onset
-- Step 234K: 63.9% exact — post-grokking oscillation begins
-- Step 333K: 98.1% exact — stabilizing
-- Step 414K: **100.0% exact** (best checkpoint)
-- **Full eval: 10010/10010 on AdderBoard!**
-
-78p breakdown (vs 80p: removed pos_corr_slope/intercept = -2p):
-```
-tok_arc_A/B/start/stride: 4
-spiral_amp/phase/slope/offset: 4  (no correction!)
-z_hi_pos: 3
-special_pos_learned: 6
-shared_norm_weight: 5
-q_proj: 15
-q_phase: 1
-out_proj: 10 (rank-1)
-ffn_fc1: 10 (no bias)
-ffn_fc2: 10 (no bias)
-head_proj: 10 (also v_proj via tie_vo)
-Total: 78
-```
-
-Analysis of the removed correction:
-- In the 80p model, pos_corr_intercept = 2.96, pos_corr_slope = 0.07
-- This applies a ~4x scaling to spiral positions with slight linear variation
-- The spiral_amp parameter can absorb the constant scaling factor
-- The 78p model learns to work with pure spiral positions + independent amplitude
-
-**Submission created: `submission_78p/`**
-
-### Failed experiments update
-
-- **80p s80085**: Dead at 28.5% tok_acc, 261K steps. Seed 80085 works for 90p (no tie_vo) but not 80p (with tie_vo).
-- **70p s42**: Dead at 59.8% tok_acc, 339K steps. ffn_dim=1 too constrained.
-- **70p s80085**: Dead at 33% tok_acc, 234K steps.
-- **90p s42**: Hit 500K limit at 7.5% exact, never grokked. Only s80085 works.
-- **75p from scratch**: Dead at 28% tok_acc. Fixed norms too aggressive.
-- **75p warm-started**: Plateaued at 9-10% exact, 92% tok_acc. Close but can't break through.
-
-### Key learnings
-
-1. **Seed sensitivity is architecture-dependent**: s42 works for tie_vo models (80p, 78p), s80085 works for non-tie_vo (90p, 133p). The regularization effect of weight tying changes which optimization basins are accessible.
-
-2. **Position correction is NOT necessary**: The 78p model proves the model can learn pure spiral positions. The correction was compensating for suboptimal spiral amplitude, which the model can learn directly.
-
-3. **tie_vo acts as beneficial regularization**: 80p groks at 111K while 90p s42 never groks (500K). The forced weight sharing between V and output constrains the solution space to finding joint representations, which apparently helps grokking.
-
-4. **ffn_dim=1 is too constrained**: The carry computation genuinely needs 2 hidden dimensions. A single scalar bottleneck can't compute the required threshold function.
-
-## Session 3 — 2026-03-01 (continued)
-
-### Resuming from 75p grokking
-
-The 75p (freeze_plus_eos) run was killed mid-grok at step 168K (93.8% peak exact).
-Resumed with `--resume` from last.pt (step 195K). The LR schedule restarts but model
-state + optimizer state are preserved. At step 27K of the resumed run, WD Stage 2
-kicked in at 7.2% exact — the grokking pattern is repeating.
-
-### New compression: q_proj rank-1 factorization
-
-The q_proj maps pos_dim(3) → head_dim(5) = 15 params. A rank-1 factorization
-LowRankLinear(3,5,1) = 3+5 = 8 params saves 7 params.
-
-Added `--q-proj-rank` option to both model.py and train.py.
-
-Current experiments running:
-1. **75p cont (s42)**: Resumed from 195K checkpoint, grokking in progress
-2. **68p (s42)**: q_proj_rank=1 on top of 75p config → 68 params
-3. **65p (s42)**: 68p + freeze_z_hi → 65 params
-
-### 68p / 65p experiments — FAILED
-Rank-1 q_proj factorization (LowRankLinear(3,5,1) = 8p instead of 15p):
-- Both 68p and 65p stuck at 20.8% tok_acc (random) through 30K steps
-- Rank-1 maps all 3D positions to a 1D line — can't distinguish digit positions
-- Rank-2 gives 16p > 15p (full rank), so factorization doesn't help for these small dims
-
-### Breakthrough #7: 72p — freeze_z_hi warm-started from 75p
-
-The 72p = 75p with z_hi_pos frozen at zero (carry position = all zeros).
-Fresh 72p from scratch failed (70% tok_acc at 153K), but warm-starting from the
-75p best checkpoint (step 141K, 93.8% exact) bootstrapped it past the hard phase.
-
-**72p grokking timeline (warm-started):**
-- Step 24K: 58.7% exact (fast pickup from warm-start)
-- Step 42K: 88.9% exact (first near-peak)
-- Step 66K: 94.4% exact
-- Step 273K: 99.86% exact
-- Step 312K: **100.0% exact** (first perfect)
-- Step 345K: 100.0% exact
-- Step 360K: 100.0% exact
-
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-Config: `--norm-mode shared --tie-vo --attn-out-rank 1 --no-ffn-bias --pos-correction-mode none --freeze-special plus_eos --freeze-z-hi --tok-emb-mode parametric --vocab-size 10 --tie-qk --q-phase --warm-start <75p_best.pt>`
-
-**Submission created: `submission_72p/`**
-
-### 72p parameter breakdown
 ```
 Component           Params
 tok_emb (arc)            4  (A, B, start, stride)
 spiral_pos               4  (amp, phase, slope, offset)
-z_hi_pos              [0]  (frozen buffer)
-equals_pos               3  (EQUALS only; PLUS+EOS frozen)
+z_hi_pos                 3  (carry position)
+equals_pos               3  (EQUALS learned; PLUS+EOS frozen)
 q_proj                  15  (3->5, full rank)
 out_proj (rank-1)       10  (5x1 + 1x5)
 q_phase                  1
@@ -460,189 +129,65 @@ FFN fc1                 10  (5x2, no bias)
 FFN fc2                 10  (2x5, no bias)
 head_proj               10  (5->2, tied as v_proj)
 RMSNorm (shared)         5
-TOTAL                   72
+TOTAL                   75
 ```
 
-### 75p seed 80085 — also confirmed 100%
-- Hit 100% at step 276K, eval: 10010/10010
-- Stable at 100% through step 348K+
+### Dead Ends
 
-### Failed sub-72p experiments
-- **Rank-1 q_proj (68p):** Dead at 20% tok_acc — 1D keys can't distinguish positions
-- **Scalar norm (68p):** Dead at 50-60% tok_acc — per-dim norm weights load-bearing
-- **d_model=4 (55p):** Dead at 21% tok_acc — pos_dim=2 too constraining
-- **Freeze all special (69p):** Dead at 0% exact, 56% tok_acc — EQUALS position essential
+- **freeze_all special positions (94p):** Dead at 0% exact -- PLUS/EQUALS positions are load-bearing
+- **Rank-1 q_proj (68p):** Dead at 20% tok_acc -- 1D keys can't distinguish positions
+- **Scalar norm (68p):** Dead at 50-60% tok_acc -- per-dim norm weights are load-bearing
+- **d_model=4 (55p):** Dead at 21% tok_acc -- pos_dim=2 too constraining for spiral
+- **ffn_dim=1 (70p):** Dead at 60% tok_acc -- carry computation genuinely needs 2 hidden dims
+- **No q_phase (69p):** Dead at 21% tok_acc -- q_phase essential for tied Q/K asymmetry
 
-### Breakthrough #8: 71p — freeze spiral_offset
+### Key Learnings
 
-The spiral has 4 params: amp, phase, slope, offset. The 72p model learned:
-- spiral_offset = -0.341 (z-intercept, non-trivial)
-- spiral_slope = 0.081 (z-gradient, small)
+1. **Seed sensitivity is architecture-dependent.** s42 works for tie_vo models (80p, 78p), s80085 works for non-tie_vo (90p, 133p). Weight tying changes which optimization basins are accessible.
 
-Freezing spiral_offset=0 (1 param) → 71p. Warm-started from 72p checkpoint.
+2. **Position correction is redundant.** The spiral_amp parameter absorbs constant scaling.
 
-**71p (freeze_offset) grokking timeline:**
-- Step 30K: 26.9% exact (first signal from warm-start)
-- Step 177K: 97.5% exact
-- Step 252K: 97.6% exact (oscillating high)
-- Step 321K: **100.0% exact**
-- Step 330K: **100.0% exact**
-- Step 333K: **100.0% exact**
+3. **tie_vo is beneficial regularization.** 80p (with tie_vo) groks at 111K while 90p s42 (without tie_vo) never groks at 500K.
 
-Also tested: 71p (freeze_slope) hit 100% at step 288K — eval: 10010/10010!
+4. **ffn_dim=1 is too constrained.** The carry computation needs 2 hidden dimensions; a single scalar bottleneck cannot compute the required threshold function.
 
-**71p submission created: `submission_71p/`**
+---
 
-### Breakthrough #9: 70p — freeze spiral_offset + spiral_phase
+## Session 3: Warm-Start Cascade (75p to 62p)
 
-Key insight: spiral_phase is redundant because q_proj rotation can absorb any constant phase offset. So freeze both offset+phase.
+*Note: Everything in this section relies on warm-starting from parent models and freezing learned parameter values as buffers. These are interesting research results but do not represent legitimate from-scratch training.*
 
-70p = 72p - spiral_offset(1) - spiral_phase(1). Warm-started from 72p.
+### The Cascade Strategy
 
-**70p grokking timeline:**
-- Step 192K: 95.2% exact
-- Step 354K: **100.0% exact**
-- Step 366K: **100.0% exact**
-- Step 378K: **100.0% exact**
-- Step 381K-390K: Stable at **100.0% exact**
+Starting from the 75p from-scratch model, we systematically froze additional parameters at their trained values and warm-started from each successive checkpoint:
 
-Best checkpoint at step 312K.
-
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-Config: `--norm-mode shared --tie-vo --attn-out-rank 1 --no-ffn-bias --pos-correction-mode none --freeze-special plus_eos --freeze-z-hi --freeze-spiral offset,phase --tok-emb-mode parametric --vocab-size 10 --tie-qk --q-phase --warm-start <72p_best.pt>`
-
-**Submission created: `submission_70p/`**
-
-### 70p parameter breakdown
 ```
-Component           Params
-tok_emb (arc)            4  (A, B, start, stride)
-spiral (2 of 4)          2  (amp, slope — phase+offset frozen)
-z_hi_pos              [0]  (frozen buffer)
-equals_pos               3  (EQUALS only; PLUS+EOS frozen)
-q_proj                  15  (3->5, full rank)
-out_proj (rank-1)       10  (5x1 + 1x5)
-q_phase                  1
-FFN fc1                 10  (5x2, no bias)
-FFN fc2                 10  (2x5, no bias)
-head_proj               10  (5->2, tied as v_proj)
-RMSNorm (shared)         5
-TOTAL                   70
+75p (from scratch, s80085)
+ -> 72p: freeze z_hi_pos (3 params)
+     -> 71p: freeze spiral_offset (1 param)
+     -> 70p: freeze spiral_offset + spiral_phase (2 params)
+         -> 68p: freeze 3 spiral params + tok_arc_stride (4 params from 70p)
+         -> 66p: freeze ALL spiral + tok_arc start/stride (4 params from 70p)
+             -> 65p: tie tok_arc_A = tok_arc_B (1 param from 66p)
+             -> 63p: freeze EQUALS position (3 params from 66p)
+             -> 62p: tie A=B + freeze EQUALS (4 params from 66p)
 ```
 
-### Failed sub-70p experiments
-- **69p no q_phase**: Dead at 21% tok_acc — q_phase rotation is essential for tied Q/K
-- **68p no q_phase + freeze_slope**: Dead at 20.7% tok_acc
-- **69p freeze_slope only (from 70p)**: Stuck at 64% tok_acc at 102K — killed
+All models achieved 10010/10010 on the AdderBoard test set. Each warm-start step preserves trained values as frozen buffers, so the model retains its carry circuit while the parameter count decreases.
 
-### Breakthrough #10: 66p — freeze ALL spiral + tok_arc start+stride
+### Why This Works
 
-Implemented `--freeze-tok-arc` flag (same pattern as `--freeze-spiral`). Freezes parametric token embedding params at init values.
+At each step, we identify parameters whose learned values are either (a) redundant (spiral_phase can be absorbed by q_proj rotation) or (b) near-identical across models (tok_arc_A and tok_arc_B learned values 11.39 vs 11.47, ratio 0.993). Freezing such parameters preserves the computation while removing them from the learnable count.
 
-66p = 70p - spiral_amp(1) - spiral_slope(1) - tok_arc_start(1) - tok_arc_stride(1). Warm-started from 70p.
+### Why This is a Technicality
 
-**66p grokking timeline:**
-- Step 33K: 36.1% exact (first signal from warm-start)
-- Step 36K: 99.7% exact (rapid ascent)
-- Steps 105K-132K: Multiple 100% hits (oscillating)
-- Step 162K: Crash to 6.9% (sharp oscillation)
-- Step 165K: Recovery to **100.0% exact**
-- Steps 165K-177K: Stable at **100.0% exact** (early-stopped)
+The 62p model has only 62 learnable parameters, but its computation depends on 18 additional frozen buffer values extracted from upstream trained models. Without those specific frozen values, the 62p configuration cannot learn addition from scratch. This makes the warm-start cascade an exercise in post-hoc compression rather than true minimal learning.
 
-Best checkpoint at step 105K.
+### 62p Parameter Breakdown (Lowest Warm-Start Result)
 
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-Config: `--freeze-spiral amp,offset,phase,slope --freeze-tok-arc start,stride` (on top of 70p base config)
-
-**Submission created: `submission_66p/`**
-
-### 66p parameter breakdown
 ```
-Component           Params
-tok_arc_A                1  (frozen: start, stride)
-tok_arc_B                1
-spiral                   0  (all 4 frozen as buffers)
-z_hi_pos              [0]  (frozen buffer)
-equals_pos               3  (EQUALS only; PLUS+EOS frozen)
-q_proj                  15  (3->5, full rank)
-out_proj (rank-1)       10  (5x1 + 1x5)
-q_phase                  1
-FFN fc1                 10  (5x2, no bias)
-FFN fc2                 10  (2x5, no bias)
-head_proj               10  (5->2, tied as v_proj)
-RMSNorm (shared)         5
-TOTAL                   66
-```
-
-### Also confirmed: 68p (freeze 3 spiral + tok_arc stride)
-- Warm from 70p, early-stopped at step 294K (100% held 12K steps)
-- Eval: 10010/10010
-
-### Failed: 64p (freeze ALL tok_arc params)
-- Stuck oscillating at 50-60% exact, 95% tok_acc for 150K+ steps
-- Without any learnable amplitude (A or B), digit embeddings are fixed circles — can't adapt spacing
-- Killed at step 258K
-
-### Breakthrough #11: 65p — tie tok_arc_A = tok_arc_B
-
-Implemented `--tie-tok-arc-ab` flag. Since the 66p model learned A=11.39 and B=11.47 (ratio 0.993), tying them to share a single parameter is nearly free.
-
-65p = 66p - 1 (tied A=B makes circular arc). Warm-started from 66p.
-
-**65p grokking timeline:**
-- Step 27K: 77.2% exact (fast warm-start)
-- Step 39K: 99.1% exact
-- Step 78K: **100.0% exact** (first hit)
-- Steps 156K-192K: Mostly stable at **100.0% exact** (early-stopped)
-
-Best checkpoint at step 78K.
-
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-**Submission created: `submission_65p/`**
-
-### Breakthrough #12: 63p — freeze EQUALS position
-
-Implemented `freeze_special="plus_eos_equals"` option. The 66p model learned equals_pos=[1.93, -1.56, 0.03] — a strong non-zero position. By freezing it as a buffer and warm-starting, it retains the trained values without using learnable parameters.
-
-63p = 66p - 3 (equals_pos frozen as buffer). Warm-started from 66p.
-
-**63p grokking timeline:**
-- Step 12K: 80.2% exact
-- Step 84K: 99.6% exact
-- Step 123K: **100.0% exact** (first hit)
-- Steps 147K-159K: Stable at **100.0% exact** (early-stopped)
-
-Best checkpoint at step 123K.
-
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-**Submission created: `submission_63p/`**
-
-### Breakthrough #13: 62p — tie A=B AND freeze EQUALS
-
-The combined approach: tie_tok_arc_ab + freeze_special=plus_eos_equals.
-
-62p = 66p - 1 (tie A=B) - 3 (freeze equals_pos) = 62 learnable params. Warm-started from 66p.
-
-**62p grokking timeline:**
-- Step 21K: 96.5% exact (very early signal)
-- Step 96K: **100.0% exact** (first hit, saved as best checkpoint)
-- Steps 96K-204K: Oscillating but frequently at 100%
-- Step 192K-204K: Stable at **100.0% exact** (early-stopped)
-
-Best checkpoint at step 96K.
-
-**Full eval: 10010/10010 correct (autoregressive, seed 2025)**
-
-**Submission created: `submission_62p/`**
-
-### 62p parameter breakdown
-```
-Component           Params
-tok_arc_A (=B)           1  (circular arc, all others frozen)
+Learnable:
+tok_arc_A (=B)           1  (circular arc amplitude)
 q_phase                  1  (Q rotation angle)
 q_proj                  15  (3->5, full rank)
 out_proj (rank-1)       10  (5x1 + 1x5)
@@ -652,12 +197,211 @@ head_proj               10  (5->2, tied as v_proj)
 RMSNorm (shared)         5
 TOTAL                   62
 
-Frozen buffers (loaded from warm-start):
-tok_arc_start           1  (angle offset)
-tok_arc_stride          1  (angle per digit)
-spiral_amp/phase/slope/offset  4  (all spiral params)
-special_pos_equals      3  (EQUALS token position)
-z_hi_pos                3  (carry position)
-_plus_pos, _eos_pos     6  (zero vectors)
+Frozen buffers (from warm-start cascade):
+tok_arc_start            1
+tok_arc_stride           1
+spiral (amp,phase,slope,offset)  4
+special_pos_equals       3
+z_hi_pos                 3
+_plus_pos, _eos_pos      6  (zero vectors)
+TOTAL frozen            18
 ```
 
+### Failed Sub-70p Attempts
+
+- **64p (freeze ALL tok_arc params):** Stuck at 50-60% exact -- without any learnable amplitude, digit embeddings are fixed circles and can't adapt spacing
+- **69p (no q_phase from 70p):** Dead at 21% tok_acc
+
+---
+
+## Session 4: SAM and WD Variants (Negative Results)
+
+### Motivation
+
+The from-scratch frontier sat at 75p (later confirmed at 72p with s80085). Can alternative optimizers push it lower?
+
+### SAM (Sharpness-Aware Minimization)
+
+**Hypothesis:** The 72p loss landscape has sharp local optima trapping SGD. SAM's adversarial weight perturbation should find flatter minima.
+
+**Result: SAM hurts small models.** Tested rho=0.05 and rho=0.01 across seeds 42 and 80085:
+
+| Run | rho | Seed | tok_acc | Baseline tok_acc |
+|-----|-----|------|---------|------------------|
+| SAM | 0.05 | 42 | 43% | 70% |
+| SAM | 0.05 | 80085 | 26% | 99.9% |
+| SAM | 0.01 | 42 | 56% | 70% |
+
+SAM was uniformly worse than vanilla AdamW. The adversarial perturbation disrupts the delicate feature learning required at 72p. Lower rho helps but never reaches baseline performance.
+
+### WD Schedule Variants
+
+**Hypothesis:** The adaptive WD has a chicken-and-egg problem at small model sizes -- WD doesn't drop because the model never reaches the grokking threshold, and the model never groks because WD is too high.
+
+Tested scheduled drops (fixed step), cyclical (cosine oscillation), and warmup (zero then ramp) WD modes. **All produced identical ~26% tok_acc**, same as no WD adaptation. The 72p failure for most seeds is not caused by WD timing -- it is a seed/initialization issue.
+
+### The Real Discovery: 72p From Scratch (seed 80085)
+
+While testing alternatives, vanilla AdamW with s80085 grokked 72p from scratch:
+
+- Grokking onset at 21K steps (90.6% tok, 28.4% exact)
+- Extreme post-grokking oscillation for ~240K steps (0%-99.5% exact)
+- Stabilized at 100% by step 267K (10010/10010)
+
+This established that the from-scratch frontier was 72p, not 75p. (Later seed sweep work in Session 5 further confirmed this.)
+
+### Key Insights
+
+1. **SAM is counterproductive for tiny models.** The hypothesis that sharp minima trap SGD at 72p is wrong. The issue is basin accessibility from initialization, not basin sharpness.
+
+2. **WD scheduling is irrelevant.** All schedule variants produce the same failure mode as no WD adaptation.
+
+3. **Seed is everything at 72p.** s80085 groks easily; s42 gets to 70% tok_acc but never groks; s123 shows faint signals (2% exact); s1 and s1337 fail completely.
+
+---
+
+## Session 5: Seed Sensitivity Sweep
+
+### Experimental Design
+
+- **10 random seeds**: 13453, 15614, 29267, 41876, 65866, 67086, 72950, 78779, 81460, 84830
+- **2 configs**: 75p (freeze_special=plus_eos) and 72p (same + freeze_z_hi)
+- **Kill criterion**: val_exact < 0.2 AND tok_acc < 0.8 at step 50K
+- **Max steps**: 300K
+- Managed by `sweep_seed_sensitivity.py`
+
+### Results: 75p
+
+| Seed | Peak Exact | Peak Tok | Step@Peak | Behavior |
+|------|-----------|---------|-----------|----------|
+| 13453 | 0.3% | 68.7% | 36K | dead |
+| 15614 | 0.0% | 61.6% | -- | dead |
+| **29267** | **14.7%** | **85.8%** | 27K | slow signal, killed |
+| 41876 | 0.5% | 76.4% | 42K | dead |
+| 65866 | 0.2% | 69.0% | 33K | dead |
+| **67086** | **2.5%** | **80.7%** | 27K | signal, collapsed |
+| **72950** | **9.6%** | **86.6%** | 18K | early burst, collapsed |
+| **78779** | **95.8%** | **99.7%** | **33K** | **flash grok: spiked to 95.8%, crashed by 51K** |
+| 81460 | 0.0% | 26.6% | -- | dead |
+| 84830 | 0.0% | 56.7% | -- | dead |
+
+### Results: 72p
+
+| Seed | Peak Exact | Peak Tok | Step@Peak | Behavior |
+|------|-----------|---------|-----------|----------|
+| 13453 | 1.0% | 71.3% | 27K | dead |
+| 15614 | 0.0% | 26.3% | -- | dead |
+| 29267 | 0.0% | 20.9% | -- | dead |
+| 41876 | 0.2% | 68.4% | 39K | dead |
+| **65866** | **4.9%** | **85.8%** | 51K | weak signal |
+| **67086** | **91.6%** | **99.3%** | **282K** | **approaching 100% at step limit** |
+| **72950** | **64.9%** | **96.5%** | **39K** | **flash grok, then crashed** |
+| 78779 | 0.0% | 58.3% | -- | dead |
+| 81460 | 0.0% | 35.5% | -- | dead |
+| 84830 | 0.5% | 76.2% | 33K | dead |
+
+### Key Findings
+
+**1. Grokking seeds are config-specific.** Seeds that grok at 75p fail at 72p, and vice versa:
+
+| Seed | 75p Peak | 72p Peak |
+|------|---------|---------|
+| 78779 | **95.8%** | 0.02% |
+| 67086 | 2.5% | **91.6%** |
+| 72950 | 9.6% | **64.9%** |
+| 29267 | **14.7%** | 0.0% |
+
+The freeze_z_hi constraint does not make grokking globally harder or easier -- it fundamentally changes the loss landscape topology, redirecting which initialization basins lead to the 100% solution.
+
+**2. Flash grokking is a real phenomenon.** 75p s78779 achieved 95.8% exact at step 33K -- a full grokking spike in only 33K steps -- then immediately crashed to 0.5% by step 51K. The carry circuit crystallized briefly but the basin was too shallow to maintain under continued gradient updates. 72p s72950 showed similar behavior (64.9% then crash).
+
+**3. About 10-20% of random seeds show grokking signals.** Counting seeds with >2% val_exact: 4/10 at 75p, 3/10 at 72p. Including s80085 (works for both), the estimated rate for stable 100% grokking is ~10%.
+
+**4. The kill criterion was too aggressive.** The 50K cutoff missed critical runs: 75p s78779 grokked at 33K but crashed by 51K; 72p s72950 had 64.9% at 39K. Recommended future criterion: peak_exact < 0.02 AND tok_acc < 0.70 at step 80K.
+
+---
+
+## Session 6: Scaffold Experiments (Negative Results)
+
+### Motivation
+
+The warm-start cascade (Session 3) is tedious -- each step requires a separate training run. Scaffold training aims to replace this with a single run: train with extra capacity, anneal the scaffold to zero via L1 penalty, then hard-prune to the target size.
+
+### Approach
+
+Scaffold capacity was added by widening out_proj (rank 1 to 2) and FFN (dim 2 to 3), bringing a 75p target model to 85p effective parameters. L1 penalty on scaffold weights was supposed to drive them toward zero for clean pruning.
+
+### Results: All Eight Experiments Failed
+
+**Phase 1 -- Standard L1 (3 runs):**
+
+| lambda | Seed | Outcome |
+|--------|------|---------|
+| 0.1 | 42 | L1 equilibrium: scaffold weights hover at 0.6-0.7, never reach zero |
+| 0.1 | 80085 | Catastrophic collapse: L1 destroyed the carry circuit at 87K (42% exact to 0%) |
+| 0.5 | 42 | Suppressed learning: L1 too strong from the start, 19% peak exact |
+
+**Phase 2 -- Late L1 after grokking (3 runs):**
+
+| lambda | anneal_start | Seed | Outcome |
+|--------|-------------|------|---------|
+| 0.1 | 150K | 42 | Degraded from 44% to 1% exact after L1 started |
+| 0.1 | 150K | 80085 | Degraded from 55% to 0% exact after L1 started |
+| 0 (control) | -- | 42 | 85p model plateaus at 47% exact, never groks |
+
+The control run revealed a deeper problem: the 85p scaffold model never reaches 100% even without any L1. The widen-then-prune approach is doubly doomed.
+
+**Phase 3 -- Freeze-in-place scaffold (2 runs):**
+An alternative approach that freezes parameters at their trained values (like the warm-start cascade but automated). This is conceptually equivalent to the warm-start cascade and was abandoned as also being a technicality rather than a true training method.
+
+### Root Cause Analysis
+
+The L1 penalty is fundamentally adversarial to task learning in tiny models. Three failure modes:
+
+1. **L1 equilibrium** (low lambda): Scaffold weights hover at small but nonzero values -- task gradient pushes them up, L1 pushes them down
+2. **Catastrophic collapse** (medium lambda): L1 eventually wins, scaffold dims go to zero suddenly, carry circuit lost
+3. **Suppressed learning** (high lambda): L1 too strong from the start, model never develops a carry circuit
+
+**Core lesson:** You cannot remove structural capacity from a tiny model's carry circuit. Dimension pruning is like removing a wire from a circuit board. The warm-start cascade works precisely because it freezes (preserves) values rather than removing dimensions.
+
+---
+
+## Comprehensive Seed Database
+
+| Params | Seed | Peak Exact | Steps | Status | Source |
+|--------|------|-----------|-------|--------|--------|
+| 75p | 80085 | 100% | 276K | GROKKED | Session 2 |
+| 75p | 78779 | 95.8% | 33K | Flash (unstable) | Session 5 sweep |
+| 75p | 29267 | 14.7% | 27K | Signal (killed 51K) | Session 5 sweep |
+| 75p | 72950 | 9.6% | 18K | Signal (killed 51K) | Session 5 sweep |
+| 75p | 67086 | 2.5% | 27K | Signal (killed 51K) | Session 5 sweep |
+| 72p | 80085 | 100% | 267K | GROKKED | Session 4 |
+| 72p | 67086 | 91.6% | 282K | Grokking (hit 300K limit) | Session 5 sweep |
+| 72p | 72950 | 64.9% | 39K | Flash (crashed) | Session 5 sweep |
+| 72p | 65866 | 4.9% | 51K | Signal (killed 63K) | Session 5 sweep |
+| 72p | 123 | 2.2% | 99K | Signal (killed) | Session 4 |
+| 72p | 42 | 0% | 180K | 70% tok plateau | Session 4 |
+
+---
+
+## Current State
+
+**From-scratch frontier: 75 parameters, 100% accuracy (10010/10010), seed 80085.**
+
+The 75p model represents the minimum parameter count at which this architecture can learn 10-digit addition from random initialization without relying on warm-started or frozen values from larger models. The 72p from-scratch result (also s80085) is the absolute minimum confirmed, but with extreme post-grokking instability.
+
+### Architecture (75p)
+
+Single-layer decoder with d_model=5 (tok_dim=2, pos_dim=3), 1 attention head (head_dim=5), ffn_dim=2. Parametric token embeddings (circular arc), spiral positional encoding (no correction), shared RMSNorm, tied V/output, rank-1 output projection, no FFN bias.
+
+### What We Learned
+
+1. **Architecture matters more than optimization tricks.** The path from 170p to 75p was entirely structural: smaller d_model, single head, parametric embeddings, weight tying, rank reduction. SAM, WD scheduling, and scaffold training all failed.
+
+2. **Grokking in tiny models is seed-dependent.** Only ~10% of random seeds produce stable grokking at 75p. The initial weight configuration must land near the right optimization basin.
+
+3. **Constraint-as-regularization.** Weight tying (tie_vo) and parameter freezing change which optimization basins are accessible, often beneficially. But each constraint changes the set of viable seeds.
+
+4. **Flash grokking exists.** Models can transiently solve the task then forget -- the carry circuit crystallizes briefly but gets dissolved by gradient noise in shallow basins.
+
+5. **You cannot prune structural capacity from tiny models.** L1 regularization and dimension pruning are adversarial to task learning when the model is near its capacity floor. The carry circuit uses every available dimension.

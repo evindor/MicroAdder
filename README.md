@@ -1,115 +1,129 @@
 # MicroAdder
 
-A **170-parameter** trained transformer that performs 10-digit addition with 100% accuracy. Built for the [AdderBoard](https://github.com/anadim/AdderBoard) challenge.
+A **75-parameter** trained transformer that performs 10-digit addition with 100% accuracy. Built for the [AdderBoard](https://github.com/anadim/AdderBoard) challenge.
 
 ## Current Best Result
 
-**170 parameters, 100% accuracy** (10010/10010 confirmed on AdderBoard verification).
+**75 parameters, 100% accuracy** (10010/10010). Trained from scratch — no warm-starting, no frozen pretrained values.
 
-| | Params | Accuracy (10K) | Seed |
-|---|---|---|---|
-| **Best (uncompressed)** | **170** | **100%** | 80085 |
-| Previous best | 187 | 100% | 777, 1995 |
-| Earlier | 203 | 100% | 777, 69420, 1995 |
+| | Params | Accuracy (10K) | Seed | From scratch? |
+|---|---|---|---|---|
+| **Current best** | **75** | **100%** | 80085 | Yes |
+| Previous best | 170 | 100% | 80085 | Yes |
+| Earlier | 203 | 100% | 777, 69420, 1995 | Yes |
 
 ### Model Architecture
 
-1-layer autoregressive decoder with split-subspace attention and tied Q/K.
+1-layer autoregressive decoder with split-subspace attention, tied Q/K, tied V/output, shared norms.
 
 ```
-d_model = 6 = tok_dim(2) + pos_dim(4)
-1 layer, 2 heads, head_dim = 3
-FFN dim = 2 (with bias, GELU activation)
-RMSNorm (weight only, no bias)
-Tied Q/K with per-head phase rotation (2 params)
-Tied output head: head_proj(6->2) @ tok_emb.T
+d_model = 5 = tok_dim(2) + pos_dim(3)
+1 layer, 1 head, head_dim = 5 (full d_model rank)
+FFN dim = 2 (no bias, GELU activation)
+Shared RMSNorm (one weight vector for all 3 norms)
+Tied Q/K with per-head phase rotation (1 param)
+Tied V/output: v_proj = head_proj.T (no separate V projection)
+Rank-1 attention output: A(5x1) @ B(1x5)
+Parametric token embedding: 4 arc params for 10 digits
+Spiral positional encoding: 4 params, no correction
+Vocab = 10 (special tokens → digit-0, distinguished by position)
 ```
 
-### Parameter Budget (170p)
+### Parameter Budget (75p)
 
 ```
-tok_emb           28  (14 x 2, tied with output)
-spiral params      4  (amp, phase, slope, offset)
-linear pos corr    2  (slope + intercept)
-z_hi_pos           4  (1 x 4, carry position)
-special_pos        8  (2 x 4, PLUS + EQUALS; EOS frozen to zero)
-q_proj            24  (4 -> 6, shared with K)
-q_phase            2  (per-head rotation angle)
-v_proj            12  (2 -> 6)
-out_proj          24  (6x2 + 2x6, rank-2 factorized)
-ln1 + ln2 + ln_f  18  (3 x 6)
-fc1 (w+b)         14  (6 -> 2)
-fc2 (w+b)         18  (2 -> 6)
-head_proj         12  (6 -> 2)
-─────────────────────
-TOTAL            170
+tok_arc (A, B, start, stride)   4  parametric token embeddings
+spiral (amp, phase, slope, off) 4  positional encoding
+z_hi_pos                        3  carry position (1 x 3)
+special_pos_equals              3  EQUALS position (PLUS/EOS frozen to zero)
+q_phase_angle                   1  Q rotation for tied Q/K asymmetry
+q_proj                         15  (3 -> 5, shared with K)
+out_proj                       10  (5x1 + 1x5, rank-1 factorized)
+FFN fc1                        10  (5 -> 2, no bias)
+FFN fc2                        10  (2 -> 5, no bias)
+head_proj                      10  (5 -> 2, also used as v_proj)
+RMSNorm (shared)                5  (one weight, 3 norms)
+───────────────────────────────
+TOTAL                          75
 ```
 
 ## Our Contributions
 
-### tok_dim=2, pos_dim=4 Reshape
+### d_model=5, Single Head (170p → 75p)
 
-The most recent compression: **-17 parameters**. The token embedding subspace is shrunk from 3D to 2D (SVD of trained embeddings shows 96% energy in 2 dimensions). This reduces tok_emb (14x3 -> 14x2), v_proj (3->6 to 2->6), and head_proj (6->3 to 6->2), while slightly expanding q_proj (3->6 to 4->6). The tied output head must discriminate 14 classes from 2D embeddings — this is tight, making grokking seed-sensitive (1/3 seeds succeed).
+The largest structural change: shrinking from d_model=6 with 2 heads (head_dim=3) to d_model=5 with 1 head (head_dim=5). One head with full d_model rank is more expressive than two heads with head_dim=3 each, and the reduced d_model cascades savings across every layer. Combined with vocab=10, this unlocked the entire sub-100p compression path.
+
+### Parametric Token Embeddings
+
+Instead of a 10×2 learned embedding table (20p), we parameterize all 10 digit embeddings as points on a 2D arc: `(A·cos(start + i·stride), B·sin(start + i·stride))` — just 4 parameters. The model learns the optimal arc shape during training.
+
+### Tied V/Output
+
+The value projection and the output head share weights: `v_proj.weight = head_proj.weight.T`. Both map between tok_dim (2) and d_model (5). Despite the trained matrices not being naturally similar (cosine sim = -0.30 in the untied model), tying them acts as beneficial regularization.
+
+### Shared RMSNorm
+
+All three RMSNorm layers (pre-attention, pre-FFN, final) share a single 5D weight vector — 5 params instead of 15. The model finds a single normalization scale that works in all three positions.
 
 ### Tied Q/K with Per-Head Phase Rotation
 
-The single biggest compression: **-16 parameters**. Q and K share the same projection matrix. A learnable per-head angle (2 params) rotates pairs of Q dimensions — `Q_rot = Q*cos(θ) - Q_swap*sin(θ)` — giving each head a unique "viewing angle" on the shared key space. This provides the asymmetry that carry routing requires, replacing an 18-parameter K projection with just 2 parameters. This overturns the earlier finding that tied Q/K caps at 39% accuracy.
+Q and K share the same projection matrix. A learnable rotation angle (1 param) rotates pairs of Q dimensions — `Q_rot = Q·cos(θ) - Q_swap·sin(θ)` — providing the asymmetry the carry circuit needs. This replaces a separate K projection (15p) with just 1 parameter.
 
 ### Adaptive Weight Decay
 
-Weight decay drops from 0.01 → 0.001 → 0.0001 as grokking is detected (val_exact crosses 20% then 50%), enabling quicker convergence. The carry circuit needs large weights to approximate hard step functions; constant WD fights this sharpening process.
+Weight decay drops from 0.01 → 0.001 → 0.0001 as grokking is detected (val_exact crosses thresholds), enabling quicker convergence. The carry circuit needs large weights to approximate hard step functions; constant WD fights this sharpening process.
 
 ### Carry-Mix Training Curriculum
 
-A training-time data sampling strategy that oversamples carry-heavy examples early, then fades them out so the model finishes on a natural distribution. Under uniform random sampling, long carry chains (e.g., `9999999999 + 1`) are exponentially rare — carry-mix guarantees the model sees them regularly.
+30% of each batch is replaced with structured carry-heavy problems (cascading carries, all-9s chains, etc.), fading to 0% as token accuracy rises. Combined with a digit curriculum (1-3 digits → 1-6 → 1-10), this addresses the exponentially rare long carry chains without distorting the final training distribution.
 
-**How it works:** 30% of each batch is replaced with structured carry-heavy problems from four patterns — isolated single carries, cascading all-9s chains, single-digit place additions, and power-of-10 boundary crossings. This fraction fades linearly to 0% as token accuracy rises from 0.7 to 0.9, ensuring the model's final training is on the natural distribution.
+See **[carry-mix.md](carry-mix.md)** for the full design.
 
-Combined with a digit curriculum (1-3 digits for 2K steps, 1-6 for 5K, then full 1-10), carry-mix accelerates grokking dramatically by addressing the long tail of hard addition problems without distorting what the model converges to.
+### Spiral Positional Encoding
 
-See **[carry-mix.md](carry-mix.md)** for the full design, the four carry patterns, the adaptive fading schedule, and results.
+Parametric spiral `(amp·cos(2πi/10 + phase), amp·sin(2πi/10 + phase), slope·i + offset)` captures the base-10 periodic structure of digit positions with just 4 parameters, replacing 30 learned position parameters.
 
-### Spiral+Correction Positional Encoding
+### Rank-1 Attention Output
 
-Replaced JackCai's 30 learned position parameters with a parametric spiral (4 params) plus a linear correction (2 params), saving **24 parameters**. The spiral `(amp*cos(angle), amp*sin(angle), slope*i + offset)` captures the base-10 periodic structure of digit positions, while the linear correction `(1 + intercept + slope*i)` gives per-position magnitude control.
+The attention output matrix is factored as `A(5×1) @ B(1×5)` = 10 params instead of a full 5×5 = 25 params.
 
-### Rank-2 Attention Output Projection
-
-The attention output matrix is factored as `A(6x2) @ B(2x6)` = 24 params instead of a full `6x6` = 36 params, saving **12 parameters**. We verified via SVD that trained checkpoints concentrate >85% of energy in the top 2 singular values, then confirmed this can be trained natively from scratch.
-
-### Frozen EOS Special Position
-
-The EOS token's positional encoding is fixed to zero (a buffer, not a parameter), saving **3 parameters**. Post-training analysis showed EOS position is exactly zero in every grokked checkpoint — it carries no positional information the model needs.
-
-
-## Path to 170p
+## Compression Path
 
 ```
 242p  JackCai's split-subspace architecture (SOTA at the time)
-  |   - d_model=6, split Q/K/V, shared XYZ positions, tied output head
+  |   d_model=6, split Q/K/V, shared XYZ positions, tied output, RMSNorm
   |
 226p  Spiral+correction positions (-16p)
-  |   - Parametric spiral replaces 30 learned position params with 14
-  |   - Carry-focused curriculum helps grokking
+  |   Parametric spiral replaces 30 learned position params
   |
-214p  + Rank-2 attention output (-12p)
-  |   - out_proj factored as A(6x2) @ B(2x6), trained natively
-  |   - 4/10 seeds grok at this size
+214p  Rank-2 attention output (-12p)
+  |   out_proj factored as A(6x2) @ B(2x6)
   |
-203p  + Linear pos correction + frozen EOS (-11p)
-  |   - 10 per-position corrections -> 2 linear params (-8p)
-  |   - EOS special position frozen to zero (-3p)
-  |   - 3/4 seeds grok at this size
+203p  Linear pos correction + frozen EOS (-11p)
+  |   10 corrections → 2 linear params, EOS position → zero
   |
-187p  + Tied Q/K with q-phase rotation (-16p)
-  |   - k_proj (18p) eliminated, replaced by q_phase_angle (2p)
-  |   - Per-head angle: Q_rot = Q·cos(θ) - Q_swap·sin(θ)
-  |   - Adaptive weight decay: 18x faster grokking (~33K steps)
-  |   - 2/3 seeds grok at this size
+187p  Tied Q/K with q-phase rotation (-16p)
+  |   k_proj eliminated; Q_rot = Q·cos(θ) - Q_swap·sin(θ)
+  |   Adaptive weight decay (18x faster grokking)
   |
-170p  + tok_dim=2, pos_dim=4 reshape (-17p)
-      - Token embedding subspace shrunk from 3D to 2D
-      - Seed-sensitive: 1/3 seeds grok (80085 at 15K steps)
+170p  tok_dim=2, pos_dim=4 reshape (-17p)
+  |   Token subspace 3D→2D (96% SVD energy)
+  |
+133p  vocab=10, d_model=5, 1 head, parametric tok_emb (-37p)
+  |   All special tokens → digit-0; 4 arc params vs 20 learned
+  |   Rank-1 out_proj, no FFN bias, no pos correction
+  |
+100p  Same + all the above stacked
+  |
+ 80p  Shared norms + tied V/output (-20p)
+  |   Single RMSNorm weight, v_proj = head_proj.T
+  |
+ 78p  Remove position correction (-2p)
+  |   Spiral amp absorbs constant scaling
+  |
+ 75p  Freeze PLUS+EOS positions (-3p)
+      Delimiter positions fixed at zero
+      ** FROM-SCRATCH FRONTIER **
 ```
 
 ## Quick Start
@@ -117,19 +131,38 @@ The EOS token's positional encoding is fixed to zero (a buffer, not a parameter)
 ```bash
 cd microadder
 
-# Verify submission
-uv run python ../AdderBoard/verify.py submission_170p/submission_170p.py
+# Verify submission (75p)
+uv run python ../AdderBoard/verify.py submission_75p/submission_75p.py
 
-# Train from scratch (170p)
-uv run python -m src.train --run-name my_170p_run \
-    --tie-qk --q-phase --tok-dim 2 --pos-dim 4 \
-    --pos-mode spiral_correct --attn-out-rank 2 \
-    --pos-correction-mode linear --freeze-special eos \
-    --wd-adaptive --wd-drop-exact 0.2 --wd-drop-exact-final 0.5 \
-    --seed 80085 --steps 500000 --lr 0.02 --carry-mix 0.3
+# Train from scratch (75p, ~276K steps to grok)
+uv run python -m src.train --run-name my_75p_run \
+    --d-model 5 --tok-dim 2 --pos-dim 3 --n-heads 1 --head-dim 5 \
+    --ffn-dim 2 --no-ffn-bias --tie-qk --q-phase --attn-out-rank 1 \
+    --vocab-size 10 --tok-emb-mode parametric \
+    --pos-mode spiral_correct --pos-correction-mode none \
+    --freeze-special plus_eos --norm-mode shared --tie-vo \
+    --lr 0.02 --carry-mix 0.3 --wd-adaptive \
+    --seed 80085 --steps 400000
 
 # Evaluate a checkpoint
 uv run python -m src.eval --checkpoint results/runs/<run>/checkpoints/best.pt --autoregressive
+```
+
+## Project Structure
+
+```
+src/
+  model.py    - MicroAdder model definition
+  train.py    - Training loop with curriculum, adaptive WD
+  data.py     - Data generation, tokenization, positional encoding maps
+  eval.py     - Evaluation scripts
+
+submission_75p/   - Current best: 75p from scratch
+submission_100p/  - 100p milestone
+submission_170p/  - 170p (original sub-200p breakthrough)
+
+RESEARCH.md       - Detailed research notes and architecture analysis
+JOURNEY.md        - Chronological research narrative
 ```
 
 ## Credits

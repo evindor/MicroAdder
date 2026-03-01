@@ -1,5 +1,5 @@
 """
-71-parameter trained transformer for 10-digit addition.
+75-parameter trained transformer for 10-digit addition.
 
 Architecture: 1-layer decoder, d_model=5 (2 tok + 3 pos), 1 head, hd=5, ff=2
 Key innovations:
@@ -8,15 +8,12 @@ Key innovations:
   - Parametric token embeddings: 4 arc params instead of 20 learned params
   - Rank-1 attention output projection: A(5x1) @ B(1x5) = 10p instead of 20p
   - No FFN bias: saves 7p (fc1_bias=2, fc2_bias=5)
-  - Spiral positions (no linear correction), tied Q/K + q-phase
-  - Shared norms: all 3 RMSNorm layers share one weight vector (saves 10p)
-  - Tied V/output: v_proj removed, V computed via head_proj.weight (saves 10p)
-  - No position correction: saves 2p
-  - Frozen z_hi carry position (buffer, not parameter): saves 3p
-  - Frozen PLUS and EOS positions (only EQUALS learned): saves 3p
-  - Frozen spiral_offset (buffer, not parameter): saves 1p vs 72p
+  - Spiral positions (no correction), frozen PLUS/EOS, tied Q/K + q-phase
+  - Shared norms: single RMSNorm weight shared across ln1/ln2/ln_f (5p not 15p)
+  - Tied V/output: head_proj doubles as v_proj (no separate v_proj)
 
-Training: AdamW (lr=0.02, wd=0.01 adaptive), aggressive WD thresholds
+Training: AdamW (lr=0.02, wd=0.01 adaptive), freeze_special=plus_eos,
+          from-scratch seed 80085, grokked at ~36K steps.
           10010/10010 on AdderBoard evaluation.
 """
 
@@ -66,6 +63,16 @@ def _build_pos_map():
 # -- Modules --
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, x):
+        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
 class LowRankLinear(nn.Module):
     def __init__(self, in_features, out_features, rank):
         super().__init__()
@@ -86,49 +93,43 @@ class MicroAdder(nn.Module):
         self.tok_arc_start = nn.Parameter(torch.tensor(-1.2))
         self.tok_arc_stride = nn.Parameter(torch.tensor(0.29))
 
-        # Spiral positional encoding (NO position correction)
-        # spiral_offset is a BUFFER (frozen, not a parameter) -- saves 1p vs 72p
-        # It may hold a non-zero value from warm-starting, loaded from checkpoint.
+        # Spiral positional encoding (no correction)
         self.spiral_amp = nn.Parameter(torch.tensor(1.0))
         self.spiral_phase = nn.Parameter(torch.tensor(0.0))
         self.spiral_slope = nn.Parameter(torch.tensor(1.0 / 9.0))
-        self.register_buffer("spiral_offset", torch.tensor(0.0))
+        self.spiral_offset = nn.Parameter(torch.tensor(0.0))
 
-        # Carry position: frozen at zero (buffer, NOT parameter)
-        self.register_buffer("z_hi_pos", torch.zeros(1, POS_DIM))
+        # Carry position (learnable)
+        self.z_hi_pos = nn.Parameter(torch.zeros(1, POS_DIM))
 
-        # Special positions: only EQUALS is learned; PLUS and EOS frozen at zero
-        self.special_pos_equals = nn.Parameter(torch.zeros(1, POS_DIM))
+        # Special positions: PLUS and EOS are frozen zero buffers, EQUALS is learnable
         self.register_buffer("_plus_pos", torch.zeros(1, POS_DIM))
+        self.special_pos_equals = nn.Parameter(torch.zeros(1, POS_DIM))
         self.register_buffer("_eos_pos", torch.zeros(1, POS_DIM))
 
         sources, indices = _build_pos_map()
         self.register_buffer("_pos_sources", sources)
         self.register_buffer("_pos_indices", indices)
 
-        # Attention (rank-1 output, no v_proj -- tied to head_proj)
+        # Attention (rank-1 output, tied Q/K, no separate v_proj -- tie_vo)
         self.q_proj = nn.Linear(POS_DIM, HEAD_DIM, bias=False)
         self.out_proj = LowRankLinear(HEAD_DIM, D_MODEL, rank=1)
         self.q_phase_angle = nn.Parameter(torch.zeros(1))
 
-        # Shared norm: one weight vector used by ln1, ln2, ln_f
-        self.norm_weight = nn.Parameter(torch.ones(D_MODEL))
-        self.norm_eps = 1e-5
+        # Shared norm: single RMSNorm weight used for ln1, ln2, ln_f
+        self.ln1 = RMSNorm(D_MODEL)
 
         # FFN (no bias!)
         self.ffn_fc1 = nn.Linear(D_MODEL, FFN_DIM, bias=False)
         self.ffn_fc2 = nn.Linear(FFN_DIM, D_MODEL, bias=False)
 
-        # Tied output head (also used as v_proj)
+        # Tied output head (also serves as v_proj via tie_vo)
         self.head_proj = nn.Linear(D_MODEL, TOK_DIM, bias=False)
 
         self.register_buffer(
             "causal_mask",
             torch.tril(torch.ones(MAX_SEQ_LEN, MAX_SEQ_LEN)).unsqueeze(0).unsqueeze(0),
         )
-
-    def _rms_norm(self, x):
-        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.norm_eps) * self.norm_weight
 
     def _tok_emb_table(self):
         d = torch.arange(VOCAB_SIZE, device=self.tok_arc_A.device, dtype=self.tok_arc_A.dtype)
@@ -143,11 +144,11 @@ class MicroAdder(nn.Module):
         base[:, 0] = self.spiral_amp * torch.cos(angle)
         base[:, 1] = self.spiral_amp * torch.sin(angle)
         base[:, 2] = self.spiral_slope * idx + self.spiral_offset
+        # No position correction -- just return base spiral
         return base
 
     def _get_positions(self, T):
         digit_pos = self._get_digit_positions()
-        # Build special_pos: [PLUS, EQUALS, EOS] = [frozen, learned, frozen]
         special_pos = torch.cat([self._plus_pos, self.special_pos_equals, self._eos_pos], dim=0)
         tables = [digit_pos, self.z_hi_pos, special_pos]
         src = self._pos_sources[:T]
@@ -178,12 +179,13 @@ class MicroAdder(nn.Module):
         pos = self._get_positions(T).unsqueeze(0).expand(B, -1, -1)
         x = torch.cat([tok, pos], dim=-1)
 
-        # Attention (shared norm for ln1, V tied to head_proj)
-        h = self._rms_norm(x)
+        # Attention (tie_vo: V uses head_proj.weight transposed)
+        h = self.ln1(x)
         q = self.q_proj(h[:, :, TOK_DIM:]).view(B, T, 1, HEAD_DIM).transpose(1, 2)
         k = self.q_proj(h[:, :, TOK_DIM:]).view(B, T, 1, HEAD_DIM).transpose(1, 2)
-        # V uses head_proj.weight: (B,T,2) @ (2,5) -> (B,T,5)
-        v = (h[:, :, :TOK_DIM] @ self.head_proj.weight).view(B, T, 1, HEAD_DIM).transpose(1, 2)
+        # V = h_tok @ head_proj.weight (tie_vo: v_proj.weight = head_proj.weight.T)
+        # F.linear(h_tok, head_proj.weight.T) = h_tok @ head_proj.weight
+        v = F.linear(h[:, :, :TOK_DIM], self.head_proj.weight.T).view(B, T, 1, HEAD_DIM).transpose(1, 2)
         q = self._apply_q_phase(q)
         att = (q @ k.transpose(-2, -1)) / math.sqrt(HEAD_DIM)
         att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
@@ -191,11 +193,11 @@ class MicroAdder(nn.Module):
         out = (att @ v).transpose(1, 2).contiguous().view(B, T, HEAD_DIM)
         x = x + self.out_proj(out)
 
-        # FFN (shared norm for ln2)
-        x = x + self.ffn_fc2(F.gelu(self.ffn_fc1(self._rms_norm(x))))
+        # FFN (shared norm: reuse ln1)
+        x = x + self.ffn_fc2(F.gelu(self.ffn_fc1(self.ln1(x))))
 
-        # Output (shared norm for ln_f)
-        x = self._rms_norm(x)
+        # Output (shared norm: reuse ln1)
+        x = self.ln1(x)
         return self.head_proj(x) @ tok_table.T
 
     @torch.no_grad()
@@ -218,7 +220,7 @@ def build_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MicroAdder()
 
-    ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint_71p.pt")
+    ckpt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkpoint_75p.pt")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
     KEY_MAP = {
@@ -226,28 +228,18 @@ def build_model():
         "blocks.0.attn.out_proj.A": "out_proj.A",
         "blocks.0.attn.out_proj.B": "out_proj.B",
         "blocks.0.attn.q_phase_angle": "q_phase_angle",
-        "blocks.0.ln1.weight": "norm_weight",
+        "blocks.0.ln1.weight": "ln1.weight",
         "blocks.0.ffn.fc1.weight": "ffn_fc1.weight",
         "blocks.0.ffn.fc2.weight": "ffn_fc2.weight",
     }
 
-    # Keys to skip: buffers, shared norms (ln2/ln_f share with ln1), tied v_proj,
-    # position correction params (not used), and spiral_offset (frozen buffer at 0)
+    # Keys to skip entirely (buffers regenerated by model, or shared norm duplicates)
     SKIP_KEYS = {
         "blocks.0.attn.causal_mask",
         "_pos_sources",
         "_pos_indices",
-        "blocks.0.ln2.weight",
-        "ln_f.weight",
-        "blocks.0.attn.v_proj.weight",
-        "pos_corr_slope",
-        "pos_corr_intercept",
-        # Buffers: frozen positions (loaded via register_buffer, not parameters)
-        "z_hi_pos",
-        "_plus_pos",
-        "_eos_pos",
-        # NOTE: spiral_offset is NOT skipped -- it's a buffer but may hold a
-        # non-zero value from warm-starting that the model was trained with.
+        "blocks.0.ln2.weight",  # shared with ln1
+        "ln_f.weight",          # shared with ln1
     }
 
     raw = ckpt["model_state_dict"]
@@ -265,10 +257,10 @@ def build_model():
     n_params = sum(p.numel() for p in model.parameters() if id(p) not in seen and not seen.add(id(p)))
 
     metadata = {
-        "name": "MicroAdder 71p",
+        "name": "MicroAdder 75p",
         "author": "Arseniy Zarechnev",
         "params": n_params,
-        "architecture": "1L decoder, d=5, 1h, hd=5, ff=2, rank-1 out, no FFN bias, parametric tok_emb, vocab=10, shared norms, tied V/O, no pos correction, frozen z_hi, frozen PLUS+EOS, frozen spiral_offset",
+        "architecture": "1L decoder, d=5, 1h, hd=5, ff=2, rank-1 out, no FFN bias, parametric tok_emb, vocab=10, shared norms, tie_vo, no pos correction",
     }
     return model, metadata
 

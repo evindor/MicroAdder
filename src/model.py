@@ -882,6 +882,130 @@ class MicroAdder(nn.Module):
             )
         return logits, loss
 
+    # ── Scaffold weights ────────────────────────────────────────────────
+
+    def get_scaffold_l1(self, target_cfg: 'ModelConfig') -> torch.Tensor:
+        """Compute L1 penalty on scaffold (extra) dimensions.
+
+        Penalizes:
+          - out_proj: extra rank columns/rows beyond target_cfg.attn_out_rank
+          - FFN: extra hidden dims beyond target_cfg.ffn_dim
+          - norms: difference between ln2/ln_f weights and ln1 weight (drives toward shared)
+        """
+        device = next(self.parameters()).device
+        l1 = torch.tensor(0.0, device=device)
+
+        for block in self.blocks:
+            # out_proj scaffold: extra rank indices
+            if (target_cfg.attn_out_rank > 0
+                    and self.cfg.attn_out_rank > target_cfg.attn_out_rank
+                    and isinstance(block.attn.out_proj, LowRankLinear)):
+                target_rank = target_cfg.attn_out_rank
+                l1 = l1 + block.attn.out_proj.A[:, target_rank:].abs().sum()
+                l1 = l1 + block.attn.out_proj.B[target_rank:, :].abs().sum()
+
+            # FFN scaffold: extra hidden dims
+            if self.cfg.ffn_dim > target_cfg.ffn_dim:
+                target_dim = target_cfg.ffn_dim
+                l1 = l1 + block.ffn.fc1.weight[target_dim:, :].abs().sum()
+                l1 = l1 + block.ffn.fc2.weight[:, target_dim:].abs().sum()
+                if block.ffn.fc1.bias is not None:
+                    l1 = l1 + block.ffn.fc1.bias[target_dim:].abs().sum()
+                if block.ffn.fc2.bias is not None:
+                    l1 = l1 + block.ffn.fc2.bias.abs().sum()  # full bias since output dim unchanged
+
+            # Norm scaffold: difference-based (drives ln2, ln_f toward ln1)
+            if (self.cfg.norm_mode != "shared"
+                    and target_cfg.norm_mode == "shared"
+                    and hasattr(block, 'ln2') and block.has_ln2
+                    and hasattr(block.ln1, 'weight')):
+                l1 = l1 + (block.ln2.weight - block.ln1.weight).abs().sum()
+
+        # ln_f vs ln1 of first block
+        if (self.cfg.norm_mode != "shared"
+                and target_cfg.norm_mode == "shared"
+                and hasattr(self.ln_f, 'weight')
+                and hasattr(self.blocks[0].ln1, 'weight')):
+            l1 = l1 + (self.ln_f.weight - self.blocks[0].ln1.weight).abs().sum()
+
+        return l1
+
+    def prune_scaffold(self, target_cfg: 'ModelConfig') -> None:
+        """Hard-prune scaffold dimensions, restructuring layers in-place.
+
+        After pruning, the model has exactly the target architecture.
+        """
+        for block in self.blocks:
+            # Prune out_proj rank
+            if (target_cfg.attn_out_rank > 0
+                    and self.cfg.attn_out_rank > target_cfg.attn_out_rank
+                    and isinstance(block.attn.out_proj, LowRankLinear)):
+                old = block.attn.out_proj
+                target_rank = target_cfg.attn_out_rank
+                new_proj = LowRankLinear(
+                    old.A.shape[0], old.B.shape[1], target_rank
+                ).to(old.A.device)
+                with torch.no_grad():
+                    new_proj.A.copy_(old.A[:, :target_rank])
+                    new_proj.B.copy_(old.B[:target_rank, :])
+                block.attn.out_proj = new_proj
+
+            # Prune FFN hidden dim
+            if self.cfg.ffn_dim > target_cfg.ffn_dim:
+                old_fc1 = block.ffn.fc1
+                old_fc2 = block.ffn.fc2
+                target_dim = target_cfg.ffn_dim
+                has_bias = old_fc1.bias is not None
+
+                new_fc1 = nn.Linear(old_fc1.in_features, target_dim, bias=has_bias).to(old_fc1.weight.device)
+                new_fc2 = nn.Linear(target_dim, old_fc2.out_features, bias=has_bias).to(old_fc2.weight.device)
+                with torch.no_grad():
+                    new_fc1.weight.copy_(old_fc1.weight[:target_dim, :])
+                    new_fc2.weight.copy_(old_fc2.weight[:, :target_dim])
+                    if has_bias:
+                        new_fc1.bias.copy_(old_fc1.bias[:target_dim])
+                        new_fc2.bias.copy_(old_fc2.bias)
+                block.ffn.fc1 = new_fc1
+                block.ffn.fc2 = new_fc2
+
+            # Prune norms to shared mode
+            if (self.cfg.norm_mode != "shared"
+                    and target_cfg.norm_mode == "shared"
+                    and hasattr(block, 'ln2') and block.has_ln2
+                    and hasattr(block.ln1, 'weight')):
+                block.ln2.weight = block.ln1.weight
+
+        # Share ln_f weight with ln1
+        if (self.cfg.norm_mode != "shared"
+                and target_cfg.norm_mode == "shared"
+                and hasattr(self.ln_f, 'weight')
+                and hasattr(self.blocks[0].ln1, 'weight')):
+            self.ln_f.weight = self.blocks[0].ln1.weight
+
+        # Update config
+        self.cfg = copy.deepcopy(target_cfg)
+
+    def freeze_params(self, param_names: list) -> int:
+        """Convert named parameters to frozen buffers in-place, preserving their values.
+
+        Returns the number of params frozen (for logging).
+        """
+        frozen = 0
+        for name in param_names:
+            parts = name.split(".")
+            # Navigate to parent module
+            obj = self
+            for part in parts[:-1]:
+                obj = getattr(obj, part)
+            attr = parts[-1]
+            param = getattr(obj, attr)
+            if isinstance(param, nn.Parameter):
+                data = param.data.clone()
+                delattr(obj, attr)
+                obj.register_buffer(attr, data)
+                frozen += data.numel()
+        return frozen
+
     @torch.no_grad()
     def generate(self, prompt: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
         """Autoregressive greedy decoding."""

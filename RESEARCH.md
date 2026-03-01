@@ -25,41 +25,48 @@ In short: if you can swap in a different set of weights and use the exact same i
 - Fixed/sinusoidal positional encodings are not counted (following the original Transformer paper convention)
 - Learned positional encodings are counted
 
-## Current Best: 62 Parameters, 100% Accuracy
+## Current Best: 75 Parameters, 100% Accuracy (From Scratch)
 
-A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture through 13 successive breakthroughs.
+A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture. Trained from scratch (seed 80085) with no warm-starting or frozen pretrained values.
 
 ```
 d_model = 5 = tok_dim(2) + pos_dim(3)
 1 layer, 1 head, head_dim = 5
-FFN dim = 2 (no bias, GELU), shared RMSNorm
-Tied Q/K + q-phase rotation, rank-1 out_proj, tied V/output
-Parametric tok_emb (circular arc, 1 param), all positions frozen
+FFN dim = 2 (no bias, GELU), shared RMSNorm (all 3 norms share one weight)
+Tied Q/K + q-phase rotation (1 param), rank-1 out_proj
+Tied V/output (v_proj = head_proj.T, saves 10p)
+Parametric tok_emb (4 arc params: A, B, start, stride)
+Spiral positions (4 params: amp, phase, slope, offset), no correction
+PLUS/EOS frozen to zero, EQUALS learned (3p), z_hi carry learned (3p)
 ```
 
-### Parameter Budget (62p)
+### Parameter Budget (75p)
 
 ```
-tok_arc_A (=B)     1  (tied circular arc amplitude)
-q_phase            1  (Q rotation angle)
+tok_arc_A          1
+tok_arc_B          1
+tok_arc_start      1
+tok_arc_stride     1
+spiral_amp         1
+spiral_phase       1
+spiral_slope       1
+spiral_offset      1
+z_hi_pos           3  (carry position)
+special_pos_equals 3  (EQUALS position)
+q_phase_angle      1
 q_proj            15  (3 -> 5, shared with K)
 out_proj          10  (5x1 + 1x5, rank-1)
 FFN fc1           10  (5 -> 2, no bias)
 FFN fc2           10  (2 -> 5, no bias)
-head_proj         10  (5 -> 2, also used as v_proj)
-RMSNorm (shared)   5  (one weight for all 3 norms)
+head_proj         10  (5 -> 2, also v_proj via tie)
+RMSNorm (shared)   5  (one weight vector)
 ─────────────────────
-TOTAL             62
-
-Frozen buffers (loaded from warm-start):
-tok_arc_start/stride  2  (arc angle params)
-spiral params         4  (amp, phase, slope, offset)
-special_pos_equals    3  (EQUALS token position)
-z_hi_pos              3  (carry position)
-_plus_pos, _eos_pos   6  (zero vectors)
+TOTAL             75
 ```
 
-### Previous Best: 170p Parameter Budget
+Note: Fixed/sinusoidal positional encodings are not counted per the parameter counting rules. All 75 parameters above are learned.
+
+### Previous From-Scratch Best: 170p Parameter Budget
 
 ```
 tok_emb           28  (14 x 2, tied with output)
@@ -79,19 +86,27 @@ head_proj         12  (6 -> 2)
 TOTAL            170
 ```
 
-### Training Recipe
+### Training Recipe (75p from scratch)
 
 - AdamW (lr=0.02), cosine decay, 500K step budget
-- Adaptive weight decay: 0.01 → 0.001 → 0.0001 at grokking thresholds (val_exact 0.2, 0.5)
+- Adaptive weight decay: `--wd-adaptive --wd-drop-exact 0.01 --wd-drop-exact-final 0.05`
 - Carry-mix curriculum: 30% carry-heavy examples, fading to 0% as tok_acc 0.7→0.9
 - Digit curriculum: 1-3 digits for 2K steps, 1-6 for 5K, then full 1-10
-- Seed 80085 grokked at ~15K steps. Seed-sensitive: 1/3 seeds grok at 170p
+- `--no-ffn-bias` required for sub-100p models (default is ffn_bias=True)
+- Seed 80085: grokked from scratch, stable 100% accuracy
+- Seed-sensitive: ~10-20% of random seeds show grokking signals at 75p; only s80085 confirmed to stably grok both 75p and 72p
+- From-scratch training works down to 72p with seed 80085
+- Below 75p requires warm-starting (see "Warm-Start Exploration" below)
 
 ---
 
-## Compression History: 242p → 62p
+## Compression History
 
 Each step represents a compression validated at 100% accuracy on AdderBoard (10010/10010).
+
+### From-Scratch Achievements: 242p → 75p
+
+These models all train from random initialization with no warm-starting. Every parameter is learned from scratch.
 
 ```
 242p  JackCai's split-subspace architecture
@@ -125,13 +140,22 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
  |    v_proj eliminated: V = x_tok @ head_proj.weight
  |
  75p  Freeze PLUS+EOS positions (-3p)
- |    Delimiter positions frozen at zero
- |
- 72p  Freeze z_hi carry position (-3p)
- |    Warm-started from 75p — critical technique
+      Delimiter positions frozen at zero
+      Groks from scratch with seed 80085
+      THIS IS THE CURRENT FROM-SCRATCH FRONTIER
+```
+
+### Warm-Start Exploration: 75p → 62p
+
+**Disclaimer:** These models rely on warm-starting from a parent checkpoint. Frozen parameters retain values learned during the parent's training, meaning the effective knowledge in the model exceeds the learnable parameter count. These results demonstrate what the architecture can *represent* but not what SGD can *discover* from scratch.
+
+```
+ 72p  Freeze z_hi carry position (-3p from 75p)
+ |    Warm-started from 75p. Also groks from scratch with s80085.
+ |    72p is the LOWEST confirmed from-scratch model.
  |
  70p  Freeze spiral_offset + spiral_phase (-2p)
- |    q_proj absorbs phase rotation; offset is z-intercept
+ |    Warm-started from 72p. Fails from scratch even with s80085.
  |
  66p  Freeze all spiral + tok_arc start+stride (-4p)
  |    Warm-started from 70p; 0 spiral params learned
@@ -145,6 +169,7 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
  62p  Tie A=B + freeze EQUALS (-4p from 66p)
       Combined approach: 62 learnable parameters
       Warm-started from 66p, grokked at ~96K steps
+      All positions + embeddings frozen to warm-start values
 ```
 
 ### Key Techniques (Our Contributions)
@@ -175,10 +200,11 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
 | Adaptive weight decay | (training) | 18x faster grokking | WD fights carry circuit sharpening |
 | Vocab=10 + d_model=5 + parametric tok_emb | 133p | 100% | Massive combined compression works |
 | Shared norms + tied V/O + no correction | 78p | 100% | 3 norms CAN share weights (contradicts 170p finding) |
-| Warm-start cascade (75p→72p→70p→66p→62p) | 62p | 100% | Incremental freezing with warm-start bypasses optimization barriers |
-| Tie tok_arc A=B (circular arc) | 65p | 100% | Converges to A/B ratio 0.993 anyway |
-| Freeze EQUALS position as buffer | 63p | 100% | Warm-start preserves trained values in buffers |
-| Freeze all positions + embeddings + tie A=B | 62p | 100% | Only 1 embedding param needed (arc amplitude) |
+| Freeze PLUS+EOS to zero (75p from scratch) | 75p | 100% | PLUS/EOS positions are zero; only EQUALS and z_hi need learning |
+| Warm-start cascade (75p→72p→...→62p) | 62p | 100% | Incremental freezing bypasses optimization barriers (not from-scratch) |
+| Tie tok_arc A=B (circular arc, warm-start) | 65p | 100% | Converges to A/B ratio 0.993 anyway |
+| Freeze EQUALS position (warm-start) | 63p | 100% | Warm-start preserves trained values in buffers |
+| Freeze all positions + embeddings + tie A=B (warm-start) | 62p | 100% | Only 1 embedding param needed (arc amplitude) |
 
 ### What Failed
 
@@ -200,6 +226,11 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
 | Grokfast (EMA gradient filter) | 170p | 0.20 tok_acc | Completely stuck; doesn't help this architecture |
 | Softmax1 (attn sum < 1) | 170p | 0% exact, 0.42 tok_acc at 189K | Stuck at memorization; "attend to nothing" hurts split-subspace carry routing |
 | Tied V/O projection (SVD diagnostic) | ~146p | Not trained | V and A occupy different 2D subspaces (principal angles 17-23°); A ≈ V@R residual 37.5%; naive tie destroys 94% of output |
+| SAM (rho=0.05) | 72p | 43% tok_acc | Adversarial perturbation disrupts learning in tiny models; gets LOWER tok_acc than vanilla AdamW (70%) |
+| SAM (rho=0.01) | 72p | 56% tok_acc | Lower rho helps but still worse than baseline; SAM is counterproductive for small models |
+| Scheduled WD (fixed step drops) | 72p | 26% tok_acc | Identical to no WD adaptation; WD timing is irrelevant at 72p |
+| Cyclical WD (cosine) | 72p | 27% tok_acc | Same as scheduled; oscillating WD between high/low doesn't help |
+| WD warmup (zero→ramp) | 72p | 28% tok_acc | Model overfits during WD=0 phase, collapses when WD ramps in |
 
 ### Hard Constraints (Updated — Some Overturned)
 
@@ -209,13 +240,19 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
 | RMSNorm, not LayerNorm | Still holds | LN adds params with no gain |
 | ~~All 3 norms independent~~ | **OVERTURNED** | All 3 norms CAN share one weight vector at d_model=5 |
 | ~~Rank-2 out_proj minimum~~ | **OVERTURNED** | Rank-1 works at d_model=5 (the 170p result was specific to d_model=6) |
-| ~~Positions not freezeable~~ | **OVERTURNED** | ALL positions can be frozen via warm-start cascade |
+| ~~Positions not freezeable~~ | **OVERTURNED** | PLUS/EOS freeze to zero from scratch (75p); all others freezeable via warm-start |
 | ~~q_proj must be full-rank~~ | Still holds at d=5 | Rank-1 q_proj failed (1D keys can't distinguish positions) |
 | Tied output head | Still holds | Untied adds too many params |
 | LSB-first digit ordering | Still holds | MSB-first breaks autoregressive carry propagation |
 | q_phase is essential | Confirmed | Without q_phase: dead at 21% tok_acc (tied Q/K needs asymmetry) |
 | FFN dim >= 2 | Confirmed | ffn_dim=1 fails at 60% tok_acc |
 | Per-dim norm weights | Confirmed | Scalar norm failed at 50-60% tok_acc |
+| SAM hurts small models | New finding | Tested rho=0.05/0.01 across seeds; always worse than vanilla AdamW at 72p |
+| WD scheduling doesn't help | New finding | Scheduled, cyclical, warmup all equivalent to no adaptation; seed is the bottleneck |
+| Adaptive WD is optimal | Confirmed | Metric-triggered drops remain the best WD strategy |
+| Grokking seeds are config-specific | **New finding** | 10-seed sweep: seeds that grok 75p fail 72p and vice versa. freeze_z_hi changes loss landscape topology, not just difficulty. |
+| "Flash grokking" occurs at small sizes | **New finding** | 75p s78779 hit 95.8% exact then crashed. Grokking basin is dynamically unstable for most seeds. |
+| Grok rate ~10-20% for random seeds | **New finding** | 10-seed sweep: ~2-4/10 seeds show grokking signals, ~1/10 approach 100%. Only s80085 works for both 75p and 72p. |
 
 ### Structural Properties (from Exp 6 diagnostics)
 
@@ -231,7 +268,7 @@ Each step represents a compression validated at 100% accuracy on AdderBoard (100
 
 ## Hand-Coded Models: What They Teach Us
 
-Three hand-coded addition transformers (36p, 40p, 87p) prove the representational floor is far below our 170p. The 170/40 = **~4x overhead** is not about capacity — it's about what SGD can discover.
+Three hand-coded addition transformers (36p, 40p, 87p) prove the representational floor is far below our 75p. The 75/40 = **~1.9x overhead** is not about capacity — it's about what SGD can discover from scratch.
 
 ### The Models
 
@@ -257,44 +294,38 @@ Three hand-coded addition transformers (36p, 40p, 87p) prove the representationa
 
 ### The Discoverability Gap
 
-| Component | 62p (ours) | 170p (prev) | param_40 (40p) |
+| Component | 75p (from scratch) | 170p (prev) | param_40 (40p) |
 |---|---|---|---|
-| tok_emb | 1p (arc amp) | 28p (14x2) | 0p (frozen) |
-| positions | 0p (frozen) | 14p (spiral+corr) | 0p (RoPE) |
+| tok_emb | 4p (arc params) | 28p (14x2) | 0p (frozen) |
+| positions | 12p (spiral+z_hi+eq) | 14p (spiral+corr) | 0p (RoPE) |
 | Q/K projections | 16p (q_proj+phase) | 26p (tied+phase) | ~5p |
 | V projection | 0p (tied V/O) | 12p | ~4p (tied V/O) |
 | out_proj | 10p (rank-1) | 24p (rank-2) | 0p (tied V/O) |
 | RMSNorm | 5p (shared) | 18p (3 x 6) | 0p (parameterless) |
 | FFN | 20p (no bias) | 32p | ~8p |
 | head_proj | 10p | 12p | 0p (tied embed) |
-| **Total** | **62p** | **170p** | **~17p** |
+| **Total** | **75p** | **170p** | **~17p** |
 
-The discoverability gap has shrunk from 170/40 = **4.25x** to 62/40 = **1.55x**. Only ~35% overhead remains over the hand-coded solution. The warm-start cascade technique was the key breakthrough — it allows SGD to navigate optimization landscapes that are too rugged for random initialization.
+The discoverability gap has shrunk from 170/40 = **4.25x** to 75/40 = **1.88x** (from scratch). The warm-start cascade can push to 62p (1.55x), but that relies on frozen pretrained values. The real SGD-discoverable frontier is 75p.
 
 ---
 
-## The Sub-100 Goal
+## The Sub-75 Goal
 
-The new target: a **general trainable architecture under 100 parameters** with 100% accuracy on 10-digit addition.
+Sub-100 has been achieved: 75p from scratch (seed 80085). The new target: **push the from-scratch frontier below 75 parameters**.
 
-"General" means: no hand-coded weights, no task-specific initialization. The same architecture should in principle work for related tasks (e.g. subtraction) with different trained weights.
+72p already works from scratch with s80085. The question is whether we can go lower without warm-starting.
 
-### Why Sub-100 Is Plausible
+### Why Sub-75 From Scratch Is Hard
 
-1. The representational floor is 36-40p. The gap is optimization, not capacity.
-2. We've already closed the gap from 6x (242/40) to 4x (170/40). Each compression made the next one harder but also taught us more about what SGD needs.
-3. The remaining 170p budget has clear redundancies: 28p on tok_emb (param_40 uses 0), 18p on norms (param_40 uses 0), 14p on positions. These won't all go to zero, but significant savings remain.
-
-### Why Sub-100 Is Hard
-
-1. **Seed sensitivity already severe.** At 170p only 1/3 seeds grok. Tighter budgets will make this worse.
-2. **Norm removal is blocked.** All 3 RMSNorm layers (18p) are load-bearing. We can't eliminate them without a fundamentally different normalization approach.
-3. **tok_dim=2 is at the limit.** The tied output head must discriminate 14 classes from 2D embeddings. Going below tok_dim=2 is impossible.
-4. **Compression interactions are nonlinear.** Freeze PAD works alone but kills grokking when combined with norm removal. More compressions stacked = more interaction failures.
+1. **Seed sensitivity is extreme.** At 75p, only ~10-20% of random seeds show grokking signals. Only s80085 is confirmed to stably grok both 75p and 72p.
+2. **70p from scratch fails.** Even with s80085, 70p (freeze spiral_offset+phase) is stuck at 36% tok_acc. Two frozen-at-zero spiral params somehow break learning dynamics.
+3. **Grokking seeds are config-specific.** Seeds that grok 75p fail 72p and vice versa. Each freeze changes the loss landscape topology, not just difficulty.
+4. **"Flash grokking" instability.** 75p s78779 spiked to 95.8% exact then crashed. The grokking basin is dynamically unstable for most seeds.
 
 ### Architecture-First, Then Training
 
-The path from 242→170 was entirely architectural compression. Training innovations (adaptive WD, carry-mix) made experiments faster but didn't reduce the parameter floor. We should continue with architecture-first until we hit the wall where further compression breaks trainability. Only then escalate to progressive-constraint or basin-discovery training methods.
+The path from 242→75 was primarily architectural compression. Training innovations (adaptive WD, carry-mix) made experiments faster but didn't reduce the parameter floor. Future work should focus on training innovations (scaffold weights, seed discovery) to push the from-scratch frontier below 75p, since the architectural budget is already very tight.
 
 ---
 
@@ -474,6 +505,14 @@ Realistically, compression interactions will block some combinations. The approa
 
 These are orthogonal to architecture and can be tested alongside any experiment.
 
+### ~~SAM (Sharpness-Aware Minimization)~~ (FAILED at 72p)
+
+SAM seeks flat minima via adversarial weight perturbation. Tested rho=0.05 and rho=0.01 across seeds 42 and 80085 at 72p. All SAM runs performed worse than vanilla AdamW. The perturbation disrupts the delicate feature learning in tiny models. Not recommended for sub-100p models.
+
+### ~~WD Schedule Variants~~ (FAILED at 72p)
+
+Tested scheduled (fixed step drops), cyclical (cosine oscillation), and warmup (zero→ramp→adaptive) WD modes at 72p. All produced identical ~26% tok_acc — no better than constant WD. The 72p failure is a seed/initialization issue, not a WD issue. The existing adaptive WD (metric-triggered drops) remains optimal.
+
 ### Continuous WD Decay
 
 Replace the discrete 2-stage WD drop with `wd = wd_init * exp(-alpha * steps_since_grok_onset)`. Smoother transition may avoid the instability that discrete drops can cause in tight models. (Note: `--wd-smooth` with ratcheted exponential decay failed at 170p, but that used a different schedule. Worth revisiting with different alpha or non-ratcheted variant.)
@@ -486,9 +525,59 @@ Different decay rates for different parameter groups. The carry circuit lives in
 
 Log per-eval: effective rank of projections, norm weight drift from 1, carry-chain error rates by chain length. Cheap to implement, gives continuous signal about whether the model is converging toward a compressible structure.
 
-### Progressive Constraint Training (Deferred)
+### ~~Progressive Constraint Training~~ (Superseded by Scaffold Weights)
 
-The idea of training wide then compressing (start at ~150p effective, progressively freeze/tie/prune to ~80p) remains theoretically sound but premature. We don't yet know the architectural floor — no point building a progressive pipeline until we know what structure to compress toward. Revisit if architecture-only gains plateau around ~120-130p.
+The idea of training wide then compressing remains sound but the scaffold weights approach below is a more concrete and generalizable implementation of the same principle.
+
+### Scaffold Weights — Wide Temporary Capacity (NEXT EXPERIMENT)
+
+**Core idea:** Give the model extra "scaffold" parameters during training that provide temporary capacity to navigate the loss landscape, then anneal them to zero so the final model has the target parameter count. This replaces the multi-run warm-start cascade with a single training run.
+
+**Wide scaffold approach (preferred — generalizable):** Train with a wider architecture than the target:
+- Rank-2 out_proj (20p) instead of rank-1 (10p) → 10 scaffold params
+- ffn_dim=3 (30p FFN) instead of dim=2 (20p) → 10 scaffold params
+- Extra norm params, unfrozen positions, etc.
+
+Apply ramping L1 penalty on scaffold params:
+```
+loss = task_loss + lambda(t) * ||scaffold_params||_1
+```
+
+**Anneal schedule — two modes:**
+1. **Metric-triggered:** Start annealing when val_exact crosses a threshold (like adaptive WD). Advantage: adapts to the model's actual grokking timeline.
+2. **Fixed schedule:** `--scaffold-anneal-start S1 --scaffold-anneal-end S2`. Lambda ramps linearly (or quadratically) from 0 to lambda_max over steps S1→S2. Advantage: simple, reproducible, no chicken-and-egg problem.
+
+Both modes should be implemented. The fixed schedule avoids the adaptive WD chicken-and-egg problem (at 72p, WD never drops because the model never groks, and the model never groks because WD is too high).
+
+**Why this matters:** Finding a reliable from-scratch seed is extremely hard. The 75p sweep (11 seeds including s80085) found only 1 that stably groks. With scaffold, the model effectively trains at ~90-95p capacity during the critical grokking phase, where the grok rate is much higher (~30-50% of seeds). As the scaffold anneals away, the model is already in the right basin and just needs to maintain the solution with fewer params — exactly what warm-start cascade does, but in one run.
+
+**First experiment:** Sub-75p target with wide scaffold. Train at ~90-95p effective capacity (rank-2 out_proj + ffn_dim=3), anneal scaffold to zero. If this groks reliably with multiple seeds, it could push the from-scratch frontier below 75p.
+
+**Implementation plan:**
+- Flag: `--scaffold <component_list>` (e.g., `--scaffold out_proj_rank,ffn_dim`)
+- Flags: `--scaffold-anneal-start <step>`, `--scaffold-anneal-end <step>`, `--scaffold-lambda <float>`
+- Optional: `--scaffold-trigger-metric <threshold>` for metric-triggered mode
+- L1 penalty on scaffold params only; rest of training unchanged
+- After anneal-end, hard-prune scaffold to zero and continue training with target architecture
+
+### Seed Discovery via Gradient Alignment (Research Direction)
+
+**Idea:** Use a known-good checkpoint as a reference to score candidate seeds before full training. Compute the cosine similarity between a seed's initial gradient and the parameter-space direction toward the known solution. Seeds whose gradients align with the basin should grok more often.
+
+```python
+known_good = load_checkpoint("72p_s80085_best.pt")
+direction = flatten(known_good.params) - flatten(init_model(seed).params)
+grad = compute_gradient(init_model(seed), batch)
+score = cosine_similarity(flatten(grad), direction)
+```
+
+Cost: ONE forward-backward pass per seed (~10ms). Could screen 10,000 seeds in seconds.
+
+**Practical limitation:** The Session 5 sweep showed that grokking seeds are highly config-specific — seeds that work for 75p fail at 72p despite only 3 params difference. This means a known-good 75p solution may not predict good 72p seeds at all. The loss landscape topology changes too much between configs for cross-config transfer.
+
+**Where it could still help:** Screening seeds within a SINGLE config. Use the 72p s80085 solution to find other 72p seeds. Use the 75p s80085 solution to find other 75p seeds. Won't generalize across configs, but could accelerate finding seeds within one.
+
+**Potential synergy with scaffold weights:** If scaffold training makes grokking much more reliable (e.g., 50% of seeds work at 90p effective), then seed discovery becomes less critical. The scaffold approach attacks the root cause (loss landscape navigation) while seed discovery is a workaround. Prioritize scaffold implementation first.
 
 ---
 
@@ -500,9 +589,15 @@ The idea of training wide then compressing (start at ~150p effective, progressiv
 
 3. **Can tied V/O work at d_model > 2?** param_40 proves it at d_model=2. At d_model=4-6, V and O serve more differentiated roles. SVD analysis of the trained checkpoint will give a preliminary answer.
 
-4. **What is the seed-sensitivity floor?** At 170p, 1/3 seeds grok. If sub-100 architectures have 1/10 or 1/20 seed success rates, is that acceptable? Or do we need training innovations specifically to improve seed robustness?
+4. **What is the seed-sensitivity floor?** *(Partially answered)* At 170p, 1/3 seeds grok. 10-seed sweep at 72p/75p: ~10-20% of random seeds show grokking signals, ~10% reach >90% exact, but only s80085 is confirmed to stably grok both configs. **Critical new finding: grokking seeds are config-specific — freeze_z_hi (75p→72p) changes WHICH seeds work, not how many.** s78779 groks 75p but fails 72p; s67086 groks 72p but fails 75p. Architectural constraints reshape the loss landscape topology. Open sub-question: can initialization strategies be designed to be basin-robust across configs?
 
-5. **Is there a role for autoregressive training?** It failed with our current adaptive WD triggers, likely because AR delays the val_exact signal that triggers WD drops. A forced WD schedule (not metric-triggered) under AR training has not been tested and could unlock faster grokking. Low priority but worth one diagnostic experiment.
+5. **Can we close the 75p→70p from-scratch gap?** 75p groks from scratch (s80085). 72p also groks from scratch (s80085, s67086 pending). But 70p fails even with s80085. The difference from 72p to 70p is 2 frozen-at-zero spiral params (phase, offset). Why do these zero-initialized learnable params matter for learning dynamics? Understanding this could unlock lower from-scratch frontiers.
+
+6. **Is there a role for autoregressive training?** It failed with our current adaptive WD triggers, likely because AR delays the val_exact signal that triggers WD drops. A forced WD schedule (not metric-triggered) under AR training has not been tested and could unlock faster grokking. Low priority but worth one diagnostic experiment.
+
+7. **What causes "flash grokking"?** 75p s78779 spiked to 95.8% exact at step 33K then crashed to 0.5% by 51K. The model found the addition solution but couldn't maintain it. Is this a learning rate issue (LR too high after grokking)? Weight decay fighting the sharpened circuit? Or an unstable equilibrium between memorization and generalization circuits? Understanding flash grokking could suggest training modifications that stabilize these transient solutions.
+
+8. **Does 72p s67086 reach 100% with more steps?** At 300K steps it was at 91.6% exact and climbing. Extending to 500K is the highest-priority follow-up. If confirmed, s67086 joins s80085 as only the second known grokking seed for 72p from scratch.
 
 ---
 
