@@ -1,20 +1,23 @@
-# Reflection: From 170 to 62 Parameters
+# Reflection: 75 Parameters From Scratch
 
-## How a Transformer Learned Perfect 10-Digit Addition in 62 Parameters
+## How a Transformer Learned Perfect 10-Digit Addition in 75 Parameters
 
-This document reflects on the research journey that compressed a trained transformer for 10-digit addition from 170 to 62 learnable parameters — a **63% reduction** — while maintaining 100% accuracy on 10,010 test cases. Along the way, we overturned several "hard constraints," discovered a powerful new training technique, and arrived at surprising conclusions about what neural networks actually need to learn.
+This document reflects on the research journey that compressed a trained transformer for 10-digit addition from 242 to **75 learnable parameters** — a **69% reduction** — while maintaining 100% accuracy on 10,010 test cases. Every parameter is learned from random initialization. No warm-starting, no frozen pretrained values, no inherited knowledge.
+
+Along the way we explored a warm-start cascade down to 62p, tried and failed scaffold training (L1 annealing, freeze-in-place), swept seeds, and ultimately concluded that warm-starting with frozen learned values is a technicality — interesting research, but not a legitimate training result. The real frontier is what SGD can discover from scratch.
 
 ---
 
 ## 1. The Journey in Numbers
 
 ```
-Session 1: 170p → 133p  (architectural: vocab, d_model, parametric embeddings)
-Session 2: 133p → 78p   (structural: shared norms, tied V/O, frozen positions)
-Session 3:  78p → 62p   (warm-start cascade: incremental freezing)
+Sessions 1-2: 242p → 75p  (architectural compression, all from scratch)
+Session 3:     75p → 62p  (warm-start cascade — later rejected as a technicality)
+Sessions 4-5:  training innovation attempts (SAM, WD variants, seed sweep)
+Session 6:     scaffold training (8 experiments, all failed)
 ```
 
-**13 successive breakthroughs**, each verified at 100% accuracy on 10,010 autoregressive evaluations:
+**9 from-scratch breakthroughs**, each verified at 100% accuracy (10010/10010):
 
 | Step | Params | Technique | Saving |
 |------|--------|-----------|--------|
@@ -24,15 +27,19 @@ Session 3:  78p → 62p   (warm-start cascade: incremental freezing)
 | 4 | 187p | Tied Q/K + q-phase | -16p |
 | 5 | 170p | tok_dim=2 reshape | -17p |
 | 6 | 133p | Vocab=10 + d_model=5 + parametric emb | -37p |
-| 7 | 100p | Various shrinks | -33p |
-| 8 | 78p | Tied V/O + shared norms | -22p |
-| 9 | 75p | Freeze PLUS+EOS | -3p |
-| 10 | 72p | Freeze z_hi carry position | -3p |
-| 11 | 70p | Freeze spiral offset+phase | -2p |
-| 12 | 66p | Freeze all spiral + tok_arc start+stride | -4p |
-| 13 | 62p | Tie A=B + freeze EQUALS position | -4p |
+| 7 | 100p | Rank-1 out_proj + no FFN bias | -33p |
+| 8 | 78p | Tied V/O + shared norms, no pos correction | -22p |
+| **9** | **75p** | **PLUS/EOS positions fixed at zero** | **-3p** |
 
-Total: 242p → 62p, a **74% compression** from the original architecture.
+Total: 242p → 75p, a **69% compression**, all from-scratch.
+
+### Why We Don't Count Warm-Start Results
+
+We also explored a warm-start cascade from 75p down to 62p by progressively freezing parameters at their trained values. Each frozen parameter was converted from `nn.Parameter` to `register_buffer` and loaded with the value from the parent checkpoint. The 62p model has 62 learnable parameters but relies on 18 frozen buffer values extracted from upstream trained models.
+
+This is a technicality. You could take any 242p model, freeze all but one parameter, and claim a "1 parameter model." The spirit of the competition is about what SGD can discover, not what post-hoc compression can preserve. The competition rule *"Fixed/sinusoidal positional encodings are not counted"* points the right direction: fixed values with no learned information don't count, but conversely, frozen *learned* values should.
+
+Our legitimate frontier is **75 parameters from scratch**.
 
 ---
 
@@ -41,125 +48,139 @@ Total: 242p → 62p, a **74% compression** from the original architecture.
 ### Validated Theories
 
 **"Attention is positional routing, not content-dependent."**
-This was our earliest structural finding at 170p: attention patterns are fixed functions of position, not token content. It predicted that vocab=10 (merging special tokens with digits) would work — and it did. It also predicted that freezing positions would be possible, since positions are just fixed lookup tables once the routing is learned. This theory held through every compression.
+Our earliest structural finding at 170p: attention patterns are fixed functions of position, not token content. It predicted that vocab=10 (merging special tokens with digits) would work — and it did. This theory held through every compression stage.
 
 **"Per-head phase rotation provides sufficient Q/K asymmetry."**
 Tied Q/K (K = Q) naively caps at 39% accuracy because carry routing needs asymmetric attention. A single learnable angle per head rotates Q relative to K, breaking symmetry with 1 parameter instead of a full K projection (15p). This idea, borrowed from the hand-coded param_40 model, saved 16p and was the foundation for all subsequent compressions.
 
-**"Split-subspace attention naturally separates token and position processing."**
-The architecture splits d_model into tok_dim (for content) and pos_dim (for position). Q/K operate on pos_dim, V on tok_dim. This clean separation allowed us to freeze all positional parameters (spiral, carry, special positions) without touching the token processing pipeline. The separation was never violated during training.
+**"The model converges toward symmetry."**
+At every stage, diagnostics showed the model converging toward simpler structures. At 75p, fresh diagnostics confirm this continues:
+- **tok_arc A/B ratio = 1.005**: Near-perfect circle (0.5% relative difference)
+- **spiral_slope = -0.058**: The z-gradient over 10 digits is only 0.52, while spiral_amp = 14.6. The z-dimension of digit positions is effectively a constant bias (offset = -7.3), not a ramp.
+- **out_proj is extremely sparse**: A writes to dims 0,1,4 only; B writes almost entirely to dim 1 (2.27 vs <0.03 for all others)
 
-**"The model converges to the minimum complexity it needs."**
-At every stage, diagnostic analysis showed the model was using only what it needed: tok_arc A≈B (ratio 0.993), spiral params near init values, EQUALS position z-dim ≈ 0. Each redundancy we observed became the next freezing target.
+Each convergence is a signal: the model tells you what's redundant.
+
+**"Constraint interactions are scale-dependent."**
+Many "hard constraints" from d_model=6 dissolved at d_model=5: norm sharing (impossible → trivial), rank-1 out_proj (dead → works), FFN bias (required → optional), tied V/O (destroys output → beneficial regularization). You can't plan a compression roadmap in advance — you have to re-test everything at each scale.
 
 ### Refuted Theories
 
-**"All 3 RMSNorm layers are highly specialized and can't be shared."**
-At 170p (d_model=6), the three norms had pairwise similarity of only 0.45-0.67 and very different weight profiles. We concluded sharing was impossible. But at d_model=5, norm sharing works perfectly — the norms converge to identical weights during training. The specialization was an artifact of the larger model having room to differentiate, not a structural requirement.
-
-**"Positions are not freezeable — spiral params drift massively from init."**
-At 170p, spiral amplitude tripled and phase rotated -61° during training. We concluded positions must be learned. But the warm-start cascade proved this wrong: you don't freeze at init values, you freeze at *learned* values. By training a larger model first and freezing its learned positions into buffers, the smaller model inherits good positions without needing to learn them.
+**"All 3 RMSNorm layers are highly specialized."**
+At 170p (d_model=6), pairwise norm similarity was only 0.45-0.67. At d_model=5, all three converge to identical weights. The specialization was an artifact of excess capacity, not a structural requirement. Diagnostics on our 75p model show ln1 = ln2 = ln_f to float precision: `[1.70, 3.14, 1.78, 1.80, 11.03]`.
 
 **"Rank-2 out_proj is the minimum trainable rank."**
-At d_model=6, rank-1 out_proj was dead (0.08% at 100K steps). At d_model=5, rank-1 works perfectly. The rank constraint was specific to the 2-head d_model=6 architecture, not a general property of addition.
+At d_model=6, rank-1 was dead (0.08%). At d_model=5, rank-1 works perfectly. The constraint was architecture-specific.
 
 **"FFN bias is required for convergence."**
-True at d_model=6, false at d_model=5. Removing bias saves 7p with no accuracy loss.
+True at d_model=6, false at d_model=5. Saves 7p.
 
-**"Freezing special positions kills grokking."**
-Freezing all special positions to zero does kill grokking (EQUALS position is essential). But freezing them as buffers that retain trained values from a warm-start works perfectly. The key insight: positions need specific values, but they don't need to be *learnable* — they need to be *correct*.
+**"L1 scaffold training can replace warm-starting."**
+Eight experiments across three approaches (standard L1, late-onset L1, freeze-in-place) all failed. L1 is fundamentally adversarial to task learning in tiny models: low lambda creates equilibrium (scaffold weights hover nonzero), medium lambda causes catastrophic collapse (carry circuit destroyed), high lambda suppresses learning entirely. You cannot remove structural capacity from a tiny model's carry circuit — it's like removing a wire from a circuit board.
 
-### Never Tested / Remained Open
+**"SAM helps tiny models find flatter minima."**
+SAM (rho=0.05 and 0.01) was uniformly worse than vanilla AdamW at 72p. The adversarial perturbation disrupts delicate feature learning. The issue at small sizes is basin accessibility from initialization, not basin sharpness.
 
-**"Can the model learn from scratch at 62p?"**
-We used warm-start cascading exclusively below 72p. Fresh training at 72p with seed 42 was known to fail (stuck at 70% tok_acc at 153K). Whether there exist seeds that can train 62p from scratch is unknown. Our hypothesis: no, the loss landscape at 62p is too rugged for random initialization.
-
-**"Is there a sub-62p trained model that works?"**
-64p (freeze all 4 tok_arc params) was stuck at 50-60% exact for 150K+ steps — the model couldn't generalize without any amplitude control over the token embedding circle. But we never tried 64p with just *one* of A or B frozen. The true floor remains unknown.
+**"WD scheduling can substitute for adaptive WD."**
+Scheduled drops, cyclical WD, and warmup WD all produced identical ~26% tok_acc at 72p. The failure mode is seed-dependent, not WD-dependent.
 
 ---
 
-## 3. Novel Discoveries
+## 3. Structural Diagnostics of the 75p Model
 
-### 3.1 The Warm-Start Cascade
+Fresh analysis of the from-scratch 75p checkpoint (seed 80085) reveals the model's internal structure and points toward future compression targets.
 
-The most important technique we discovered. The insight:
+### 3.1 Token Embeddings: A Near-Perfect Circle
 
-> You can't train a tiny model from scratch, but you *can* train it if you warm-start from a slightly larger model that was itself warm-started from an even larger one.
+The parametric arc `(A*cos(s+i*d), B*sin(s+i*d))` learned:
+- **A = 16.03, B = 15.95** — ratio 1.005, effectively a circle
+- **start = -0.60, stride = 0.133** — 68.4° total arc span
+- All 10 embedding norms are nearly identical (16.006 to 16.030)
+- Minimum pairwise distance: 2.116 (digits 4↔5), maximum: 2.119 (digits 0↔1) — remarkably uniform spacing
 
-The cascade: 75p (from scratch) → 72p (warm) → 70p (warm) → 66p (warm) → 62p (warm).
+The model wants a circle. The 0.5% A/B asymmetry is within noise. **Tying A=B saves 1p (→74p)** with near-zero risk.
 
-Each step:
-1. Train a model with N params to 100% accuracy
-2. Add one more constraint (freeze a param, tie two params)
-3. Initialize the N-1 model from the N model's checkpoint
-4. Train until it re-groks at 100%
+### 3.2 Positions: The z-Dimension is a Constant
 
-This works because each warm-start gives the smaller model a *compatible* starting point. The model only needs to adjust its remaining parameters to compensate for the newly frozen one, rather than discovering the entire solution from scratch.
+Spiral parameters learned:
+- **amp = 14.58**: Large — the xy-plane carries the main positional signal
+- **phase = -1.91**: Significant rotation from init (0.0)
+- **slope = -0.058**: Tiny. Over 10 positions, z varies by only 0.52
+- **offset = -7.30**: Large — the z-dimension is a constant bias, not a meaningful ramp
 
-**The key insight is about loss landscape topology.** The 62p loss landscape has basins of 100% accuracy, but they are unreachable from random initialization. The warm-start cascade provides a path *between* basins at different parameter counts, following a valley from higher-dimensional space into lower-dimensional space.
+The digit positions live on a flat ring: circular in xy, nearly constant in z. The z-dimension's main role is separating digit positions (z ≈ -7.3) from the carry position (z_hi dim2 = -3.4) and EQUALS (z ≈ -7.8). It does this via offset alone; slope contributes almost nothing.
 
-This is analogous to annealing: you start in a high-temperature (high-parameter) state where the landscape is smooth, then slowly cool (reduce parameters) while maintaining the model in a good basin.
+**Freezing slope=0 saves 1p (→73p with A=B tie)**. But this failed at 70p from scratch in our earlier attempts — freezing spiral params changes the loss landscape topology.
 
-### 3.2 Buffer-Preserved Warm-Starting
+### 3.3 The Carry Position is Enormous
 
-A technical innovation that made the cascade possible. When freezing a parameter:
-1. Convert it from `nn.Parameter` to `register_buffer` in the model definition
-2. The warm-start loader matches buffer names to checkpoint keys
-3. The buffer gets loaded with the *trained* value from the parent checkpoint, not the init value
-4. The value stays fixed during training (it's a buffer, not a parameter)
+z_hi_pos = [75.85, 88.13, -3.40] with norm **116.3** — 7.1x the average digit position norm (16.4). The carry-out position is deliberately pushed far from all digit positions in the attention space. This massive separation ensures clean attention routing: the carry position can never be confused with a digit position.
 
-This means the "frozen" parameters retain their optimized values — they're only frozen in the sense that the optimizer can't change them. The model effectively has the same representational capacity; it just has fewer *degrees of freedom*.
+### 3.4 The Norm as Feature Selector
 
-This raises a philosophical question: **what do we mean by "62 parameters"?** The checkpoint contains ~80 non-trivial values (including buffers). Only 62 are learnable, but the others are equally important. We count by standard convention (learnable parameters only), but the information content is higher.
+Shared norm weights: `[1.70, 3.14, 1.78, 1.80, 11.03]`
 
-### 3.3 The Convergence to Symmetry
+Dim 4 is amplified **6.5x** relative to dim 0. Dim 1 gets 1.8x amplification. Dims 0, 2, 3 pass through at ~1.8x (near-equal).
 
-At multiple stages, we observed the model spontaneously converging toward simpler structures:
-- **tok_arc_A ≈ tok_arc_B** (ratio 0.993): The model wants a circle, not an ellipse
-- **spiral_slope ≈ 0.08** (near zero): The z-gradient barely matters
-- **equals_pos z-dim ≈ 0.03** (near zero): EQUALS needs only 2D discrimination
-- **spiral_phase absorbed by q_proj**: Phase is redundant when Q can rotate
+This makes dim 4 the **information highway**: head_proj weights for dim 4 are [-16.05, 23.24] — the largest by far. The norm selectively amplifies the dimension that carries the most decision-relevant information to the output head. At d_model=5, the norm acts less as a normalizer and more as a learned feature gate.
 
-Each convergence was a signal that a parameter was redundant. **The model tells you what to freeze next** — you just have to measure what it converges to and ask "is this close enough to a fixed value?"
+### 3.5 Out_proj is Extremely Sparse
 
-### 3.4 Constraint Interactions Are Scale-Dependent
+The rank-1 out_proj factors as A(5x1) @ B(1x5):
+- **B is dominated by dim 1**: value -2.27, all others < 0.03
+- **A reads mainly from dims 0,1,4**: [-0.16, -0.73, -0.005, -0.008, 0.26]
+- Dims 2 and 3 of A are near zero (< 0.01)
 
-Many "hard constraints" from d_model=6 dissolved at d_model=5:
-- Norm sharing: impossible at d=6, trivial at d=5
-- Rank-1 out_proj: dead at d=6, works at d=5
-- FFN bias: required at d=6, optional at d=5
-- Position freezing: impossible at d=6, easy at d=5 (via warm-start)
+The attention output is projected almost entirely onto **dim 1** of the residual stream. This makes out_proj effectively a 3-to-1 mapping (dims 0,1,4 → dim 1), wasting the capacity reserved for dims 2,3. Could a sparser parameterization exploit this?
 
-This suggests that **the difficulty of each compression depends on the surrounding architecture.** An optimization that's impossible in a larger model may be trivial in a smaller one, and vice versa. You can't plan a compression roadmap in advance — you have to try things iteratively at each scale.
+### 3.6 FFN: Both Units Read Tokens, Write Tokens
+
+| Unit | Token input | Position input | Token output | Position output |
+|------|------------|----------------|--------------|-----------------|
+| 0 | 3.80 | 0.60 | 6.37 | 0.70 |
+| 1 | 2.61 | 0.87 | 2.39 | 0.60 |
+
+Both FFN units primarily read from and write to the token subspace (dims 0-1). Position input is small but nonzero. This is different from the 170p model where unit 0 was clearly a "pos→tok bridge." At d_model=5 with tied V/O, the FFN's role has shifted — it processes token information directly, with only residual position dependence.
+
+### 3.7 Out_proj.B ≠ Head_proj: Tying Won't Work
+
+Cosine similarity between out_proj.B and head_proj rows: 0.26 and 0.45. These are not naturally aligned. The "most promising avenue" from our earlier analysis (tie out_proj.B with head_proj to save 5p) is **not supported by the trained weights**. The read-side (V/head_proj) and write-side (out_proj.B) serve genuinely different functions and have not converged.
 
 ---
 
 ## 4. What We Learned About Architecture
 
-### The Irreducible Core
-
-The 62p model reveals what a transformer *must* have for 10-digit addition:
+### The Irreducible Core (75p From Scratch)
 
 | Component | Params | Why It's Essential |
 |-----------|--------|--------------------|
 | q_proj | 15 | Maps 3D positions to 5D attention space |
-| FFN (fc1+fc2) | 20 | Carry detection: reads position, writes digit correction |
-| head_proj | 10 | Output classification + V projection (tied) |
-| out_proj | 10 | Projects attention output back to residual |
-| shared norm | 5 | Per-dimension feature scaling (scalar norm failed) |
-| q_phase | 1 | Q/K asymmetry for carry routing |
-| tok_arc_A | 1 | Token embedding scale (circle radius) |
+| FFN (fc1+fc2) | 20 | Carry detection: both units read tokens, write corrections |
+| head_proj | 10 | Output classification + V projection (tied V/O) |
+| out_proj | 10 | Rank-1 projection of attention output (writes to dim 1) |
+| shared norm | 5 | Feature gate: amplifies dim 4 by 6.5x for output routing |
+| tok_arc (4) | 4 | Parametric circle: A, B, start, stride |
+| spiral (4) | 4 | Position encoding: amp, phase, slope, offset |
+| z_hi_pos | 3 | Carry position (huge norm, far from digits) |
+| equals_pos | 3 | EQUALS delimiter position |
+| q_phase | 1 | Q/K asymmetry rotation (-39.5°) |
 
-The 15p q_proj is the largest single block and seems incompressible: rank-1 fails (1D keys can't distinguish positions), and rank-2 would cost 16p > 15p at these dimensions. The FFN at 20p is also at minimum: ffn_dim=1 can't do carry detection.
+The 15p q_proj is the largest single block and seems incompressible: rank-1 fails (1D keys can't distinguish positions), rank-2 would cost 16p > 15p at these dimensions. The FFN at 20p is at minimum: ffn_dim=1 can't do carry detection. These 35p of "processing" parameters appear to be a hard floor.
 
-### What Surprised Us
+### What's Different From 170p
 
-**Only 1 parameter controls all 10 token embeddings.** The parametric arc `[A·cos(start + d·stride), A·sin(start + d·stride)]` places digits on a circle with a single learnable radius A. The angle parameters (start, stride) are frozen from a warm-start. The model needs only to control *how far* the digits are from the origin — not their angular arrangement.
+| Property | 170p | 75p |
+|----------|------|-----|
+| Token embeddings | 28p learned table | 4p parametric arc (circle) |
+| Positions | 14p (spiral+correction) | 11p (spiral only, PLUS/EOS=0) |
+| d_model | 6 (tok=2, pos=4) | 5 (tok=2, pos=3) |
+| Heads | 2 (head_dim=3) | 1 (head_dim=5 = d_model) |
+| Norms | 18p (3 independent) | 5p (shared) |
+| V projection | 12p (separate) | 0p (tied with head_proj) |
+| Out_proj | 24p (rank-2) | 10p (rank-1) |
+| FFN | 32p (with bias) | 20p (no bias) |
 
-**The shared norm does extreme work.** One 5-dimensional weight vector simultaneously serves as pre-attention norm, pre-FFN norm, and output norm. At 170p, these three norms had very different profiles. At 62p, they converge to identical weights — suggesting the model finds a *universal* scaling that works for all three purposes.
-
-**No position is learned.** At 62p, all positional information comes from frozen buffers: spiral positions, carry position, special positions, even the token embedding angles. The model does no spatial reasoning at training time — all spatial structure is inherited from the warm-start parent and frozen. Only the *processing* of spatial information (via q_proj, FFN, attention) is learned.
+Every component shrank. The biggest savings came from going to d_model=5 with a single full-rank head — one head with head_dim=5 is more expressive than two heads with head_dim=3, and the reduced d_model cascades savings through every layer.
 
 ---
 
@@ -167,13 +188,11 @@ The 15p q_proj is the largest single block and seems incompressible: rank-1 fail
 
 ### Grokking at Every Scale
 
-Every model from 170p to 62p exhibited the same grokking pattern:
-1. **Memorization phase**: Loss decreases, tok_acc rises to ~50-70%, exact match stays near 0%
-2. **Grokking transition**: Sudden jump in exact match (often 0% → 90%+ in a few thousand steps)
-3. **Oscillation phase**: Model bounces between 50-100% exact match for 50-100K steps
-4. **Stabilization**: Eventually locks in at 100% (or fails permanently)
-
-The oscillation phase is the most dangerous. At 62p, the model hit 100% at step 96K, crashed to 30% at step 174K, recovered to 100% at step 183K, and finally stabilized. The early-stopping condition (100% held for 12K steps) catches the stable phase.
+Every from-scratch model exhibited the same pattern:
+1. **Memorization**: tok_acc rises to ~50-70%, exact match stays near 0%
+2. **Grokking transition**: Sudden jump in exact match (0% → 90%+ in a few thousand steps)
+3. **Oscillation**: Model bounces between 50-100% exact for 50-100K steps
+4. **Stabilization**: Locks in at 100% (or fails permanently)
 
 ### Adaptive Weight Decay is the Key Training Innovation
 
@@ -181,127 +200,165 @@ The two-stage adaptive WD schedule was essential for every sub-100p model:
 - **Stage 1** (wd × 0.1): Triggered when val_exact > 1%
 - **Stage 2** (wd × 0.01): Triggered when val_exact > 5%
 
-Without adaptive WD, grokking either doesn't happen or takes 10-100x longer. The mechanism: weight decay actively fights the carry circuit's sharpening process. The carry detection in the FFN needs weights to grow large (toward step-function behavior). WD pushes weights toward zero, creating a tug-of-war. Dropping WD at the right moment lets the circuit sharpen.
+The mechanism: the carry circuit in the FFN needs weights to grow large (toward step-function behavior). WD pushes weights toward zero. Dropping WD at the right moment lets the circuit sharpen. Without adaptive WD, grokking either doesn't happen or takes 10-100x longer.
 
-### Warm-Start Affects Grokking Dynamics
+### Seed Sensitivity is Extreme
 
-Warm-started models grok differently from fresh models:
-- **Fresh 75p**: Grokking at ~276K steps (slow memorization → sudden generalization)
-- **Warm 72p from 75p**: First signal at ~24K, grokking at ~312K (inherited memorization, slow re-grokking with new constraint)
-- **Warm 62p from 66p**: First signal at ~21K, grokking at ~96K (faster — fewer params to adapt)
+A 10-seed sweep at 75p and 72p revealed:
+- **~10-20% of random seeds** show any grokking signal
+- **Only s80085** is confirmed to stably grok both 75p and 72p
+- **Grokking seeds are config-specific**: s78779 groks 75p (95.8% flash) but fails 72p; s67086 fails 75p but approaches 100% at 72p
+- **Flash grokking exists**: 75p s78779 spiked to 95.8% exact at 33K then crashed to 0.5% by 51K — the carry circuit crystallized briefly but dissolved in a shallow basin
 
-The warm-start provides a *head start on memorization*. The model inherits the parent's circuit and only needs to adapt the newly constrained parameters. This is faster for small changes (1-2 frozen params) but can be slower for large changes (the circuit may need significant restructuring).
+Each architectural constraint (even freezing a single parameter to zero) changes the loss landscape topology, redirecting which initialization basins lead to the addition solution.
+
+### All Training Innovations Failed
+
+SAM, WD scheduling variants, scaffold L1 training, and scaffold freeze-in-place all failed to improve over vanilla AdamW with adaptive WD. The path from 242p to 75p was entirely architectural. Training innovations made experiments faster (adaptive WD = 18x speedup) but never reduced the parameter floor.
 
 ---
 
 ## 6. The SGD Discoverability Gap
 
-### From 4.25x to 1.55x
+### From 4.25x to 1.88x
 
-The hand-coded param_40 model achieves addition in ~40 parameters. Our best trained model needs 62 — a 1.55x overhead. This is down from 4.25x (170/40) at the start of the research.
+The hand-coded param_40 model achieves addition in ~40 parameters. Our best from-scratch model needs 75 — a **1.88x overhead**.
 
-But this comparison is misleading. Our 62p model has ~18 additional parameters stored in buffers (frozen but non-trivial values). Including these, the "information content" is closer to 80 values, or 2x the hand-coded solution.
+| Threshold | Params | What it means |
+|-----------|--------|---------------|
+| Representational floor | ~40p | Hand-coded proof that 40 params suffice (param_40) |
+| From-scratch frontier | **75p** | What SGD can discover from random init (this work) |
+| Warm-start floor | ~62p | What can be preserved via cascaded freezing (rejected) |
+
+The **discoverability gap** (75/40 = 1.88x) is the overhead SGD pays for not knowing the solution in advance. Closing this gap requires either smarter optimization (which we tried and failed) or architectural innovations that make the loss landscape smoother.
 
 ### What SGD Can't Do (Yet)
 
-1. **Parameterless norms.** param_40 uses RMSNorm without learned weights (just normalize). Our model needs 5 learned norm weights. SGD can't discover a representation where all dimensions have equal importance.
+1. **Parameterless norms.** param_40 uses RMSNorm without learned weights. Our model needs 5 learned norm weights that serve as a feature gate (dim 4 amplified 6.5x). SGD can't discover a representation where all dimensions have equal importance.
 
-2. **Tied V/output/embed.** param_40 ties V projection, output projection, and token embedding into one matrix. We tie V and output but keep token embedding separate (parametric arc). Full triple-tying at d=5 might work but hasn't been tried.
+2. **Zero-parameter positions.** param_40 uses RoPE (rotation, no learned params). We need 11p of spiral + special positions. The positions carry real information (phase, offset, carry separation) that SGD must discover.
 
-3. **Zero-parameter positions.** param_40 uses RoPE (rotation, no learned params). We need spiral positions even if frozen. The positional information in the buffers is essential — it just doesn't need to be *learned* at the 62p stage.
+3. **Extreme weight magnitudes.** param_40 uses values of ~60000 for hard step functions. Our FFN weights max out at ~6.3 — an order of magnitude softer. Adaptive WD helps but doesn't fully close this gap. The carry circuit works with approximate thresholds rather than crisp ones.
 
 ### What SGD *Can* Do That Surprises
 
-1. **Learn from a single amplitude parameter.** The 62p model arranges 10 digit tokens on a circle, classifies them by output projection, and detects carries — all with tok_arc_A as the only embedding parameter.
+1. **Learn circular embeddings from 4 parameters.** The parametric arc discovers that digits should be equally spaced on a near-perfect circle — 4 params for 10 embeddings that double as output classification boundaries.
 
-2. **Re-grok after constraint changes.** Even heavy constraints (freezing 4 params at once) don't kill the model if warm-started. SGD can navigate from a slightly-incompatible solution to a compatible one.
+2. **Discover weight tying spontaneously.** At d_model=5, tied V/O (v_proj = head_proj.T) works despite analysis showing these matrices are NOT naturally aligned (cosine sim = -0.30 in untied models). The tying constraint forces the model into a different, equally valid solution.
 
-3. **Converge to optimal symmetry.** The model spontaneously makes A≈B, phase≈0, slope≈0 — signaling that these degrees of freedom are unnecessary. SGD finds the simplest solution within its parameter budget.
-
----
-
-## 7. Research Frontiers
-
-### 7.1 Can We Go Below 62p?
-
-The remaining 62 parameters break into:
-- **q_proj (15p)**: Incompressible at full rank. Could a structured q_proj (Toeplitz, circulant) reduce this?
-- **FFN (20p)**: At minimum dim. Could a single-weight carry detector work with different nonlinearities?
-- **out_proj (10p)**: Rank-1. Could it be tied to q_proj somehow?
-- **head_proj (10p)**: Tied as V. Could be tied to out_proj B?
-- **norm (5p)**: Shared. Could be eliminated with better initialization?
-- **q_phase (1p)**: Could be absorbed into q_proj initialization?
-- **tok_arc_A (1p)**: Could be fixed to a known-good value?
-
-The most promising avenue: **tie out_proj.B with head_proj.weight** (both are 1×5 / 5→2 projections). This would save 5p → 57p. The key question is whether the read-side (V/head) and write-side (out_proj) can share weights.
-
-### 7.2 Can We Train Sub-62p From Scratch?
-
-The warm-start cascade is powerful but raises questions about trainability. Can any model below ~72p be trained from random initialization? If not, what makes the loss landscape so rugged?
-
-Possible research directions:
-- **Loss landscape visualization**: Project the 62p loss landscape onto 2D and visualize basins
-- **Basin connectivity analysis**: Are the 100% accuracy basins connected at 62p? At 72p?
-- **Progressive training**: Start with all params free, gradually freeze during training (online cascade)
-- **Different optimizers**: Would sharpness-aware minimization (SAM) help navigate rugged landscapes?
-
-### 7.3 Universality of the Warm-Start Cascade
-
-Does the warm-start cascade work for other tasks?
-- Subtraction (same architecture, different weights)
-- Modular arithmetic
-- Bit manipulation tasks
-- Small language models (character-level)
-
-If the technique generalizes, it suggests a universal approach to training tiny models: train big, freeze incrementally, cascade down.
-
-### 7.4 Understanding the Buffer Values
-
-The 62p model has ~18 non-trivial values in buffers. Are these values transferable?
-- If we train a fresh 72p model with a different seed, do the frozen buffer values from seed 42 work?
-- Are the buffer values task-specific or architecture-specific?
-- Could we pre-compute optimal buffer values analytically?
-
-### 7.5 Novel Architecture Ideas
-
-**Structured q_proj**: Instead of a dense 3×5 matrix (15p), use `q_proj = U @ diag(s) @ V.T` with U fixed (e.g., Fourier) and only s (3p) learned. If the q_proj has exploitable structure, this could save 10+ parameters.
-
-**Carry detection without FFN**: The FFN's role is carry detection (reads position, writes digit correction). Could a multiplicative interaction (gating mechanism) replace the FFN with fewer parameters?
-
-**Dynamic norm**: Instead of per-dimension learned weights, use a single scalar + q_phase-style rotation for the norm. Failed as "scalar norm" (1p), but a 2-3p rotation-based norm might work.
+3. **Converge to minimal complexity.** A/B → circle, slope → 0, sparse out_proj → effectively writes to one dimension. The model finds the simplest structure that solves the task.
 
 ---
 
-## 8. Conclusions
+## 7. Research Frontiers: Pushing Below 75p From Scratch
+
+Every approach below must produce a model that trains from random initialization to 100% accuracy with no warm-starting, no frozen learned values, and no inherited knowledge. The full parameter count is the real count.
+
+### 7.1 Low-Hanging Fruit: Tie A=B (→74p)
+
+The trained model converges to A/B = 1.005. Tying tok_arc_A = tok_arc_B architecturally forces a perfect circle. This is the single safest 1p reduction and should be tested first. The key risk is that tying changes the loss landscape enough to lose s80085 as a grokking seed — a pattern we saw repeatedly in the seed sweep.
+
+### 7.2 Freeze slope=0 (→73p with A=B tie)
+
+spiral_slope = -0.058 is functionally negligible (z varies by 0.52 over 10 digits while xy varies by ±14.6). Freezing it to zero makes digit positions a flat ring. However, this is architecturally identical to the 70p configuration that failed from scratch even with s80085 — suggesting this particular constraint breaks something subtle in the initialization dynamics. Worth retesting with A=B tie in place (the combined constraint may be different from the sum of individual constraints).
+
+### 7.3 Structured q_proj (→potential -5 to -10p)
+
+The q_proj is a dense 3×5 matrix (15p). Could it be replaced with a structured form?
+
+Options:
+- **SVD truncation**: q_proj has singular values [4.78, 4.25, 1.07]. The third singular value carries only 2.7% of the energy. A rank-2 q_proj would cost 2×(3+5) = 16p — actually MORE than 15p at these dimensions. Not viable via simple rank reduction.
+- **Toeplitz/circulant**: Diagnostics show the trained q_proj is NOT Toeplitz (diagonals vary widely). No exploitable structure here.
+- **Factored with fixed basis**: `q_proj = U @ diag(s)` where U is a fixed 5×3 matrix (e.g., DFT, Hadamard) and s is 3 learned scales. 3 params instead of 15. The risk: restricting Q to a fixed subspace may prevent the carry-lookahead routing the model needs. Worth testing.
+- **Shared q_proj + head_proj structure**: Both are "position→5D" and "5D→token" mappings. A shared parameterization (e.g., q_proj = f(head_proj)) would save parameters but the functional roles are very different.
+
+### 7.4 Sparser Out_proj (→potential -3 to -5p)
+
+The trained out_proj is remarkably sparse:
+- B writes to dim 1 only (weight -2.27, all others <0.03)
+- A reads from dims 0,1,4 only (dims 2,3 weights <0.01)
+
+This suggests out_proj could be parameterized as:
+- **Scalar attention output**: A single scalar per dim, `out = alpha * attn_output[selected_dim]`, plus a target dimension. ~2-3p instead of 10p. Extreme, but the trained weights suggest the model only uses one channel.
+- **Sparse rank-1**: Fix B to a one-hot [0,1,0,0,0] vector (0p) and only learn A (5p). Saves 5p but constrains the write target.
+
+### 7.5 Absorb q_phase into q_proj (→0 savings, but clears the path)
+
+q_phase_angle = -0.690 rad (-39.5°). This could be absorbed into q_proj initialization by pre-rotating the Q matrix. Doesn't save parameters directly (q_phase is 1p, absorbed into q_proj's 15p) but simplifies the architecture and may change optimization dynamics.
+
+### 7.6 Novel Norm Parameterization (→potential -2 to -3p)
+
+The shared norm weights [1.70, 3.14, 1.78, 1.80, 11.03] have interesting structure: dims 0,2,3 are near-equal (~1.8), dim 1 is 2x, dim 4 is 6.5x. Could this be captured by a simpler form?
+
+- **2-parameter norm**: `weight = [base, base*r1, base, base, base*r2]` — 3p instead of 5p. The near-equal dims (0,2,3) share a base, dims 1 and 4 get multipliers.
+- **Pattern norm**: `weight = softmax(alpha * one_hot(4) + beta * one_hot(1)) * scale` — learns which dims to amplify. 3p for which dims and how much.
+- Scalar norm (1p) already failed at 50-60% tok_acc — per-dim weights are essential. But we haven't tested intermediate parameterizations.
+
+### 7.7 Distillation Instead of Warm-Start
+
+If we reject warm-starting with frozen learned values, distillation offers a different path. Train a larger model (e.g., 100p), then train a smaller target (e.g., 70p) with a KL-divergence loss against the teacher's output distribution. Every parameter in the student is learned from scratch — the teacher provides guidance but no frozen values end up in the student.
+
+This is philosophically different from warm-starting: the student must discover its own internal representation. The teacher only constrains the input→output mapping, not the internal weights. If the student achieves 100% accuracy, its parameters genuinely encode the addition algorithm — it wasn't given the answer, just better training signal.
+
+### 7.8 Loss Landscape Visualization
+
+Project the 75p loss landscape onto 2D:
+1. Take the trained 75p checkpoint as the origin
+2. Choose 2 random directions in parameter space (or: direction toward a failed seed's final state, and a random orthogonal)
+3. Evaluate loss on a grid
+4. Visualize the basin structure
+
+This would answer: is the 75p solution in a narrow basin (explaining seed sensitivity) or a broad one (suggesting the issue is navigating there from random init)? At different param counts (72p, 70p), does the basin shrink, fragment, or disappear?
+
+---
+
+## 8. Three Thresholds of Compression
+
+The research reveals three fundamentally different compression thresholds:
+
+### Threshold 1: Representational (40p) — "Can the architecture express it?"
+
+Proven by hand-coded models. param_40 achieves 100% addition in ~40 parameters with human-designed weights. No learning needed; the architecture is sufficient. The techniques used (extreme weight magnitudes, RoPE, parameterless norms) are representationally elegant but not SGD-discoverable.
+
+### Threshold 2: Learnability (75p) — "Can SGD discover it from scratch?"
+
+Our main result. 75 parameters, trained from random initialization, 100% accuracy. The 35p overhead over the representational floor (75/40 = 1.88x) is the **price of discoverability** — extra capacity SGD needs to navigate the loss landscape. This overhead pays for: learned norms (5p), richer positions (11p vs 0p), softer weight magnitudes (carried by additional out_proj capacity).
+
+### Threshold 3: Maintainability (62p) — "Can SGD maintain it with a hint?"
+
+Demonstrated by warm-start cascade but rejected as a legitimate result. With the right starting point, SGD can maintain the addition circuit in 62 parameters. But those 18 frozen buffer values are learned information smuggled in from a larger model. The gap between learnability and maintainability (75p vs 62p = 13p) measures how much of the 75p model's capacity is used for *navigation* during training rather than *representation* of the final solution.
+
+---
+
+## 9. Conclusions
 
 ### What Made This Possible
 
-Three factors combined to enable 170p → 62p:
+1. **Structural diagnostics.** Analyzing what the model actually learns — attention patterns, weight magnitudes, convergence directions, parameter ratios — revealed which parameters were redundant. Each diagnostic finding (A≈B, slope≈0, norms converge) became the next compression target.
 
-1. **Structural diagnostics.** Analyzing what the model actually learns (attention patterns, weight magnitudes, convergence directions) revealed which parameters were redundant. Every freezing decision was guided by measured convergence, not guesswork.
+2. **Scale-dependent experimentation.** Constraints that were impossible at d_model=6 became trivial at d_model=5. We couldn't plan the compression roadmap in advance. Each step required re-testing assumptions at the new scale.
 
-2. **The warm-start cascade.** This single technique enabled the jump from 72p (trainable from scratch) to 62p (unreachable from random init). It's the difference between proving a solution exists and actually finding it.
-
-3. **Iterative experimentation.** We tried dozens of ideas; most failed. The successes came from combining validated individual compressions incrementally, never making multiple untested changes simultaneously.
+3. **Principled rejection of shortcuts.** The warm-start cascade was our most "successful" technique (75p→62p) but we rejected it on philosophical grounds. Frozen learned values are information smuggling. This constraint — every parameter must be learned from scratch — focuses research on real innovations rather than accounting tricks.
 
 ### The Philosophical Takeaway
 
-The 62p model challenges common assumptions about neural network training:
+**Trainability ≠ expressibility.** The model can *represent* addition in 40 parameters (hand-coded). It can *learn* addition from scratch in 75 parameters. It can *maintain* addition in 62 parameters (warm-start). These are three distinct thresholds revealing the optimizer as a limiting factor separate from the architecture.
 
-**Parameters ≠ information.** The model uses 62 learnable parameters but relies on ~18 frozen buffer values. The "size" of the model depends on what you count.
+**The model tells you what to compress next.** A/B converges to a circle. Slope converges to zero. Norms converge to sharing. Out_proj converges to writing one dimension. Every convergence is an invitation to add a constraint — but each constraint changes the loss landscape, so the invitation might be a trap. Flash grokking (95.8% → crash) shows the model can transiently solve the task in a basin too shallow to maintain.
 
-**Trainability ≠ expressibility.** The model can *represent* addition in 40 parameters (proven by hand-coded solutions). It can *learn* addition from scratch in 75 parameters. It can *maintain* addition in 62 parameters (via warm-start). These are three different thresholds, and the gaps between them reveal the role of the optimizer (SGD) as a limiting factor separate from the architecture.
+**Architecture matters more than optimization tricks.** The entire path from 242p to 75p was structural: smaller d_model, fewer heads, parametric embeddings, weight tying, rank reduction. SAM, WD scheduling, scaffold training, and every other optimizer-level intervention failed. The next breakthrough will likely be architectural too.
 
-**Local optima are the enemy, not model capacity.** The 62p model has the same loss landscape as a randomly-initialized 62p model. The difference is the starting point. This suggests that training tiny models is not about finding the right architecture — it's about finding the right *path* through parameter space.
+### What's Next
 
-### What Would Change With More Time
+The priority order for pushing below 75p:
+1. **Tie A=B** (→74p): Safest single-param reduction, trained model already circular
+2. **Structured norm** (→72-73p): The 5D norm has exploitable pattern (3 equal dims + 2 amplified)
+3. **Sparse out_proj** (→70-72p): Train-from-scratch with constrained write target
+4. **Distillation** (→<70p): Teacher-guided training without frozen values
+5. **Loss landscape analysis**: Understand *why* seeds fail and *what* flash grokking reveals about basin geometry
 
-1. **Systematic sweep of all remaining 1p freeze targets** (q_phase, tok_arc_A, individual norm dims)
-2. **Cross-seed validation** of the warm-start cascade (does it work with seeds other than 42?)
-3. **Progressive online freezing** (freeze params during training as they converge, rather than between runs)
-4. **Attempting tied out_proj.B = head_proj.weight** for a possible 57p model
-5. **Loss landscape analysis** to understand why warm-start is necessary below 72p
+The discoverability gap stands at 1.88x. Closing it is the open problem.
 
 ---
 
-*Research conducted in March 2026. All models verified at 100% accuracy on AdderBoard (10,010 samples, autoregressive evaluation, seed 2025).*
+*Research conducted in March 2026. All from-scratch models verified at 100% accuracy on AdderBoard (10,010 samples, autoregressive evaluation, seed 2025).*
