@@ -1,15 +1,15 @@
-# Architecture of the 74-Parameter MicroAdder
+# Architecture of the 67-Parameter MicroAdder
 
-A detailed analysis of how a 74-parameter, single-layer transformer achieves 100% accuracy on 10-digit addition (10,010/10,010 test cases on AdderBoard).
+A detailed analysis of how a 67-parameter, single-layer transformer achieves 100% accuracy on 10-digit addition (10,010/10,010 test cases on AdderBoard).
 
-**Checkpoint:** `results/runs/sub100_74p_cm80_sf_120k_s45214_s45214/checkpoints/best.pt`
-**Submission:** `submission_74p/submission_74p.py`
+**Checkpoint:** `results/runs/sub100_67p_qkdim4_scaledsin_2_noawd_fast_s71046/checkpoints/best.pt`
+**Submission:** `submission_67p/submission_67p.py`
 
 ---
 
 ## 1. Overview
 
-The MicroAdder is a 1-layer decoder-only transformer with `d_model=5`, split into a 2D **token subspace** and a 3D **position subspace**. It performs 10-digit decimal addition in LSB-first (least-significant-bit first) order using autoregressive generation.
+The MicroAdder is a 1-layer decoder-only transformer with `d_model=5`, split into a 2D **token subspace** and a 3D **position subspace**. It uses a 4D Q/K attention subspace (decoupled from the 5D value pathway) and frozen sinusoidal positional encoding. It performs 10-digit decimal addition in LSB-first (least-significant-bit first) order using autoregressive generation.
 
 ### Sequence Format
 
@@ -47,29 +47,30 @@ The token and position subspaces serve completely different roles:
 - **Token dims (0, 1):** Carry digit identity information; read by the V projection and output head
 - **Position dims (2, 3, 4):** Carry position information; read by Q/K projections for attention routing
 
-### Parameter Budget (74 total)
+### Parameter Budget (67 total)
 
 | Component | Parameters | Description |
 |---|---|---|
 | tok_arc (A, start, stride) | 3 | Circular token embedding (A=B tied) |
-| spiral (amp, phase, slope, offset) | 4 | Spiral positional encoding |
 | z_hi_pos | 3 | Carry-out position vector |
 | special_pos_equals | 3 | EQUALS token position |
 | q_phase_angle | 1 | Q/K asymmetry rotation |
-| q_proj | 15 | Shared Q/K projection (3 -> 5) |
+| q_proj | 12 | Shared Q/K projection (3 -> 4) |
 | out_proj | 10 | Rank-1 attention output (5x1 + 1x5) |
 | FFN fc1 | 10 | First FFN layer (5 -> 2, no bias) |
 | FFN fc2 | 10 | Second FFN layer (2 -> 5, no bias) |
 | head_proj | 10 | Output/V projection (5 -> 2) |
 | RMSNorm (shared) | 5 | Single weight vector for all 3 norms |
-| **Total** | **74** | |
+| **Total** | **67** | |
+
+Free (frozen): spiral (amp=3.5, phase=0, slope=0.15, offset=0), PLUS/EOS positions (zero).
 
 ### Forward Pass Summary
 
 ```
 1. Embed:     x = [tok_table[token] | position_vector]        (2D + 3D = 5D)
 2. Norm1:     h = RMSNorm(x)
-3. Attention: Q,K from h[:, 2:5] (position); V from h[:, 0:2] (token)
+3. Attention: Q,K from h[:, 2:5] via q_proj (3->4); V from h[:, 0:2] (5D via tied head_proj)
 4. Out_proj:  x += rank1_proj(attention_output)                (writes to dim1)
 5. Norm2:     h2 = RMSNorm(x)
 6. FFN:       x += fc2(GELU(fc1(h2)))                         (carry detection)
@@ -91,25 +92,25 @@ emb(d) = [A * cos(start + d * stride), A * sin(start + d * stride)]
 
 | Parameter | Value | Description |
 |---|---|---|
-| A (radius) | 12.9863 | Circle radius (A=B tied, so it is a perfect circle) |
-| start | -0.5325 rad (-30.51 deg) | Starting angle for digit 0 |
-| stride | 0.1213 rad (6.95 deg) | Angular spacing between consecutive digits |
-| total arc | 1.0914 rad (62.53 deg) | Arc span from digit 0 to digit 9 |
+| A (radius) | 6.0641 | Circle radius (A=B tied, so it is a perfect circle) |
+| start | -0.4902 rad (-28.09 deg) | Starting angle for digit 0 |
+| stride | 0.1387 rad (7.95 deg) | Angular spacing between consecutive digits |
+| total arc | 1.2480 rad (71.51 deg) | Arc span from digit 0 to digit 9 |
 
 ### Digit Coordinates
 
 | Digit | x | y | Angle |
 |---|---|---|---|
-| 0 | 11.188 | -6.594 | -30.51 deg |
-| 1 | 11.903 | -5.192 | -23.56 deg |
-| 2 | 12.444 | -3.714 | -16.62 deg |
-| 3 | 12.802 | -2.181 | -9.67 deg |
-| 4 | 12.972 | -0.616 | -2.72 deg |
-| 5 | 12.951 | 0.957 | 4.23 deg |
-| 6 | 12.740 | 2.517 | 11.18 deg |
-| 7 | 12.342 | 4.040 | 18.12 deg |
-| 8 | 11.763 | 5.503 | 25.07 deg |
-| 9 | 11.010 | 6.886 | 32.02 deg |
+| 0 | 5.350 | -2.855 | -28.09 deg |
+| 1 | 5.693 | -2.088 | -20.14 deg |
+| 2 | 5.927 | -1.281 | -12.20 deg |
+| 3 | 6.047 | -0.449 | -4.25 deg |
+| 4 | 6.051 | 0.391 | 3.70 deg |
+| 5 | 5.939 | 1.224 | 11.64 deg |
+| 6 | 5.713 | 2.033 | 19.59 deg |
+| 7 | 5.377 | 2.803 | 27.53 deg |
+| 8 | 4.938 | 3.519 | 35.48 deg |
+| 9 | 4.405 | 4.168 | 43.42 deg |
 
 ### Key Properties
 
@@ -117,16 +118,11 @@ emb(d) = [A * cos(start + d * stride), A * sin(start + d * stride)]
 
 2. **Monotonic y-coordinate:** Digit 0 has the lowest y-value (-6.594) and digit 9 has the highest (6.886). This monotonic relationship between digit value and the y-coordinate is critical for the carry detection mechanism (see Section 6).
 
-3. **Pairwise distances are Toeplitz:** The distance between digits `i` and `j` depends only on `|i-j|`:
-
-```
-|i-j|:  0     1      2      3      4      5      6      7      8      9
-dist:  0.00  1.574  3.142  4.699  6.238  7.754  9.242  10.696  12.110  13.480
-```
+3. **Pairwise distances are Toeplitz:** The distance between digits `i` and `j` depends only on `|i-j|`, a consequence of uniform angular spacing on a circle.
 
 ### Decision Boundaries
 
-The output logit for digit `d` is `<head_proj(norm(x)), tok_table[d]>`. Since all digit embeddings lie on a circle of radius A=12.986, the decision boundary between any two digits is the perpendicular bisector of the chord connecting them. The equal spacing means these bisectors are evenly spaced, giving each digit an equal-width "wedge" of the 2D token space.
+The output logit for digit `d` is `<head_proj(norm(x)), tok_table[d]>`. Since all digit embeddings lie on a circle of radius A=6.064, the decision boundary between any two digits is the perpendicular bisector of the chord connecting them. The equal spacing means these bisectors are evenly spaced, giving each digit an equal-width "wedge" of the 2D token space.
 
 ---
 
@@ -134,39 +130,39 @@ The output logit for digit `d` is `<head_proj(norm(x)), tok_table[d]>`. Since al
 
 Positions are encoded in the 3D position subspace. There are four types of positions:
 
-### 3.1 Digit Positions (Spiral)
+### 3.1 Digit Positions (Frozen Sinusoidal)
 
-The 10 digit positions (shared across X, Y, and Z) lie on a 3D spiral:
+The 10 digit positions (shared across X, Y, and Z) lie on a fixed sinusoidal spiral with zero learned parameters:
 
 ```
-pos[i] = [amp * cos(2*pi*i/10 + phase),
-          amp * sin(2*pi*i/10 + phase),
-          slope * i + offset]
+pos[i] = [3.5 * cos(2*pi*i/10),
+          3.5 * sin(2*pi*i/10),
+          0.15 * i]
 ```
 
-| Parameter | Value |
-|---|---|
-| amp | 3.5630 |
-| phase | -0.4420 rad (-25.33 deg) |
-| slope | 0.1694 |
-| offset | -2.5476 |
+| Parameter | Value | Status |
+|---|---|---|
+| amp | 3.5000 | Frozen |
+| phase | 0.0000 | Frozen |
+| slope | 0.1500 | Frozen |
+| offset | 0.0000 | Frozen |
 
-The spiral is **nearly flat**: the z-range is [-2.548, -1.023] (span of 1.524), while the xy-amplitude is 3.563. The ratio `slope*9 / amp = 0.43`, meaning the helix is stretched wide relative to its height. In the xy-plane, the 10 positions are evenly distributed around a circle at 36-degree intervals.
+The positions form a **nearly flat sinusoidal ring**: the z-range is [0, 1.35] (span of 1.35), while the xy-amplitude is 3.5. The ratio `slope*9 / amp = 0.39`, meaning the helix is stretched wide relative to its height. In the xy-plane, the 10 positions are evenly distributed around a circle at 36-degree intervals, starting at 0° (unlike the 74p model which learned phase=-25.3°).
 
 Digit position vectors:
 
 | Position | x | y | z | Norm |
 |---|---|---|---|---|
-| pos[0] | 3.221 | -1.524 | -2.548 | 4.380 |
-| pos[1] | 3.501 | 0.660 | -2.378 | 4.284 |
-| pos[2] | 2.445 | 2.592 | -2.209 | 4.192 |
-| pos[3] | 0.454 | 3.534 | -2.040 | 4.105 |
-| pos[4] | -1.710 | 3.126 | -1.870 | 4.024 |
-| pos[5] | -3.221 | 1.524 | -1.701 | 3.948 |
-| pos[6] | -3.501 | -0.660 | -1.531 | 3.878 |
-| pos[7] | -2.445 | -2.592 | -1.362 | 3.815 |
-| pos[8] | -0.454 | -3.534 | -1.193 | 3.757 |
-| pos[9] | 1.710 | -3.126 | -1.023 | 3.707 |
+| pos[0] | 3.500 | 0.000 | 0.000 | 3.500 |
+| pos[1] | 2.832 | 2.057 | 0.150 | 3.503 |
+| pos[2] | 1.082 | 3.329 | 0.300 | 3.513 |
+| pos[3] | -1.082 | 3.329 | 0.450 | 3.529 |
+| pos[4] | -2.832 | 2.057 | 0.600 | 3.551 |
+| pos[5] | -3.500 | 0.000 | 0.750 | 3.579 |
+| pos[6] | -2.832 | -2.057 | 0.900 | 3.614 |
+| pos[7] | -1.082 | -3.329 | 1.050 | 3.654 |
+| pos[8] | 1.082 | -3.329 | 1.200 | 3.700 |
+| pos[9] | 2.832 | -2.057 | 1.350 | 3.751 |
 
 ### 3.2 Position Sharing: The Critical Design Choice
 
@@ -177,13 +173,15 @@ X[i], Y[i], and Z[i] all share the same position vector `pos[i]`. This means the
 | Position | Vector | Norm | Notes |
 |---|---|---|---|
 | PLUS (pos 10) | [0, 0, 0] | 0.000 | Frozen at zero (not learned) |
-| EQUALS (pos 21) | [2.644, -2.414, -1.033] | 3.726 | Learned; near pos[0] in direction |
+| EQUALS (pos 21) | [3.471, -1.040, 0.995] | 3.757 | Learned; near pos[0] in direction |
 | EOS (pos 33) | [0, 0, 0] | 0.000 | Frozen at zero (not learned) |
-| Z[10] carry (pos 32) | [36.013, -32.834, 6.452] | 49.159 | Learned; **12.3x** larger than digit positions |
+| Z[10] carry (pos 32) | [3.073, -1.404, 15.874] | 16.230 | Learned; **4.6x** larger than digit positions |
 
-### 3.4 The Enormous Carry Position
+### 3.4 The Large Carry Position
 
-The z_hi carry position has norm 49.16, which is **12.3x** the average digit position norm of 4.01. This extreme scale serves a precise purpose: when multiplied by the Q/K projection, the carry position produces attention scores that are vastly larger than any digit position. This ensures Z[10] (the carry-out digit) attends **100%** to itself, completely ignoring all other positions. The carry position acts as an attention "black hole."
+The z_hi carry position has norm 16.23, which is **4.6x** the average digit position norm of ~3.55. This is smaller than the 74p model's 49.2 (12.3x), but still large enough that Z[10] (the carry-out digit) attends **100%** to itself, completely ignoring all other positions. The carry position acts as an attention "black hole."
+
+Notably, the 67p carry position achieves its dominance primarily through the z-dimension (15.87), while the xy-components (3.07, -1.40) are similar in magnitude to digit positions. The Q/K projection amplifies this z-component into large attention scores.
 
 ---
 
@@ -198,39 +196,38 @@ Attention in this model has a unique split-subspace design:
 
 This means **attention patterns are 100% determined by positions, independent of input tokens**. The same set of attention weights is used for every possible addition problem. The positions route information; the tokens carry the payload.
 
-### 4.2 Tied Q/K with Phase Rotation
+### 4.2 Tied Q/K with Phase Rotation (qk_dim=4)
 
-Q and K share the same linear projection (15 parameters for a 3->5 linear map):
+Q and K share the same linear projection (12 parameters for a 3->4 linear map):
 
 ```
-q_proj weight (5x3):
-  [-3.376,  3.042, -0.650]
-  [ 0.478, -3.591, -0.211]
-  [-2.515, -2.498,  1.458]
-  [ 3.495,  1.677, -0.043]
-  [ 0.000, -0.000,  0.000]     <-- dim 4 is dead
+q_proj weight (4x3):
+  [-2.463, -0.472,  0.315]
+  [-1.878,  1.487,  1.099]
+  [-0.793,  2.211, -1.530]
+  [ 1.482,  2.264,  0.268]
 ```
 
-Note: the 5th row is effectively zero, meaning the projection only uses 4 of the 5 head dimensions. This is equivalent to a head_dim=4 model with one wasted dimension.
+All 4 rows are active — unlike the 74p model which had a dead 5th row. The reduction from 5D to 4D Q/K space formalizes what the 74p model already learned: 4 dimensions suffice for position-based attention routing. The value pathway remains at 5D (full d_model), decoupling routing from content.
 
 Without the phase rotation, Q = K exactly, which forces `Q[i] . K[j] = K[i] . K[j]` to be symmetric. This means each position would attend most strongly to **itself** (since `K[i] . K[i]` is maximal by Cauchy-Schwarz).
 
 ### 4.3 The Phase Rotation Breaks Self-Attention
 
-The phase angle is **0.7201 rad (41.26 degrees)**. It applies a rotation to Q in the (dim0, dim1) and (dim2, dim3) planes:
+The phase angle is **-0.5126 rad (-29.37 degrees)**. It applies a rotation to Q in the (dim0, dim1) and (dim2, dim3) planes:
 
 ```
-cos(phase) = 0.7517
-sin(phase) = 0.6595
+cos(phase) = 0.8715
+sin(phase) = -0.4904
 ```
 
-This rotation transforms self-attention into **lookahead attention**. The effect is dramatic:
+This rotation transforms self-attention into **lookahead attention**. Compared to the 74p model's +41.3° rotation, the 67p model uses a **negative** angle (-29.4°). Despite rotating in the opposite direction, it achieves the same +1 lookahead effect — the Q/K projection compensates by mapping positions differently.
 
 **Without phase (Q=K):** Position Z[0] attends uniformly to {X[0], Y[0], Z[0]} (33.3% each).
 
-**With phase:** Position Z[0] attends to {X[1], Y[1]} (49.96% each), with only 0.02% to X[0]/Y[0]/Z[0].
+**With phase:** Position Z[0] attends to {X[1], Y[1]} (~48.6% each), with ~0.9% to self and adjacent positions.
 
-The phase rotation shifts each position's attention to its **+1 neighbor** on the spiral. Since digit positions are evenly spaced at 36-degree intervals on a circle, a ~41-degree phase rotation maps each position's Q vector to align with the K vector of the next position.
+The attention is slightly less concentrated than the 74p model (48.6% vs 49.96% per slot), with ~1.8% total leakage to self and adjacent positions.
 
 ### 4.4 The Fixed Attention Pattern
 
@@ -238,33 +235,34 @@ Since attention depends only on position, we can compute the complete attention 
 
 | Position | Predicts | Attends to (>0.1%) |
 |---|---|---|
-| EQUALS (21) | Z[0] | X[0]: 49.94%, Y[0]: 49.94%, EQUALS: 0.12% |
-| Z[0] (22) | Z[1] | X[1]: 49.96%, Y[1]: 49.96% |
-| Z[1] (23) | Z[2] | X[2]: 50.00%, Y[2]: 50.00% |
-| Z[2] (24) | Z[3] | X[3]: 50.00%, Y[3]: 50.00% |
-| Z[3] (25) | Z[4] | X[4]: 49.98%, Y[4]: 49.98% |
-| Z[4] (26) | Z[5] | X[5]: 49.92%, Y[5]: 49.92% |
-| Z[5] (27) | Z[6] | X[6]: 49.97%, Y[6]: 49.97% |
-| Z[6] (28) | Z[7] | X[7]: 49.99%, Y[7]: 49.99% |
-| Z[7] (29) | Z[8] | X[8]: 50.00%, Y[8]: 50.00% |
-| Z[8] (30) | Z[9] | X[9]: 49.98%, Y[9]: 49.98% |
-| Z[9] (31) | Z[10] | EQUALS: 99.99% |
+| EQUALS (21) | Z[0] | X[0]: 47.46%, Y[0]: 47.46%, EQUALS: 5.04% |
+| Z[0] (22) | Z[1] | X[1]: 48.62%, Y[1]: 48.62%, Z[0]: 0.92%, Y[0]: 0.92% |
+| Z[1] (23) | Z[2] | X[2]: 48.60%, Y[2]: 48.60%, Y[1]: 0.93%, Z[1]: 0.93% |
+| Z[2] (24) | Z[3] | X[3]: 48.79%, Y[3]: 48.79%, Z[2]: 0.81%, Y[2]: 0.81% |
+| Z[3] (25) | Z[4] | X[4]: 48.89%, Y[4]: 48.89%, Y[3]: 0.74%, X[3]: 0.74% |
+| Z[4] (26) | Z[5] | X[5]: 48.86%, Y[5]: 48.86%, X[4]: 0.76%, Z[4]: 0.76% |
+| Z[5] (27) | Z[6] | X[6]: 48.82%, Y[6]: 48.82%, Y[5]: 0.79%, X[5]: 0.79% |
+| Z[6] (28) | Z[7] | X[7]: 48.81%, Y[7]: 48.81%, X[6]: 0.79%, Y[6]: 0.79% |
+| Z[7] (29) | Z[8] | X[8]: 48.86%, Y[8]: 48.86%, X[7]: 0.76%, Z[7]: 0.76% |
+| Z[8] (30) | Z[9] | X[9]: 49.02%, Y[9]: 49.02%, Y[8]: 0.65%, X[8]: 0.65% |
+| Z[9] (31) | Z[10] | EQUALS: 99.48% |
 | Z[10]/carry (32) | EOS | Z[10]/carry: 100.00% |
 
 **Key patterns:**
-1. Each Z[i] position (predicting Z[i+1]) attends ~50/50 to X[i+1] and Y[i+1]
-2. Z[9] (predicting Z[10], the carry-out) attends 99.99% to EQUALS
-3. Z[10] (predicting EOS) attends 100% to itself (the enormous carry position dominates)
+1. Each Z[i] position (predicting Z[i+1]) attends ~48.6/48.6 to X[i+1] and Y[i+1], with ~2.8% total leakage to self and adjacent positions
+2. Z[9] (predicting Z[10], the carry-out) attends 99.48% to EQUALS
+3. Z[10] (predicting EOS) attends 100% to itself (the carry position dominates)
+4. The attention is slightly less concentrated than 74p (~97.2% vs ~99.9% on target pair), but still highly focused
 
 ### 4.5 The Q.K/K.K Ratio
 
 The phase rotation uniformly scales the self-attention score:
 
 ```
-Q[i] . K[i] / (K[i] . K[i]) = cos(phase) = 0.7517  (constant for ALL positions)
+Q[i] . K[i] / (K[i] . K[i]) = cos(phase) = 0.8715  (constant for ALL positions)
 ```
 
-This means the phase reduces each position's self-attention score by a fixed factor, while the cross-attention scores to neighbor positions are boosted. The 41-degree rotation is optimized to make the +1 neighbor the strongest match.
+This means the phase reduces each position's self-attention score by a fixed factor, while the cross-attention scores to neighbor positions are boosted. The -29.4° rotation (cos=0.8715) is less aggressive than the 74p model's 41.3° rotation (cos=0.7517) — self-attention is less suppressed, resulting in the ~1-2% leakage to self observed in the attention patterns.
 
 ---
 
@@ -279,54 +277,53 @@ The `head_proj` weight matrix (2x5, 10 parameters) serves two roles simultaneous
 
 ```
 head_proj.weight (2x5):
-  [-21.456,  0.280,  1.058,  2.536,  12.424]
-  [ -2.099, -4.889,  0.000,  0.118,  -0.162]
+  [-10.044,  0.088, -0.537,  0.709, -0.114]
+  [ -0.060, -4.016, -0.505,  0.144, -0.739]
 ```
 
 ### 5.2 V Values Encode Digit Sum
 
 When `head_proj.weight` is applied to the 2D token embedding of digit `d`, the resulting 5D value vector has a critical property: **dimension 1 is a near-linear function of digit value**.
 
-| Digit | V[dim1] |
-|---|---|
-| 0 | +35.37 |
-| 1 | +28.71 |
-| 2 | +21.64 |
-| 3 | +14.25 |
-| 4 | +6.64 |
-| 5 | -1.06 |
-| 6 | -8.74 |
-| 7 | -16.30 |
-| 8 | -23.61 |
-| 9 | -30.58 |
+| Digit | V[dim0] | V[dim1] |
+|---|---|---|
+| 0 | -53.57 | +11.94 |
+| 1 | -57.06 | +8.89 |
+| 2 | -59.46 | +5.67 |
+| 3 | -60.71 | +2.34 |
+| 4 | -60.81 | -1.04 |
+| 5 | -59.73 | -4.39 |
+| 6 | -57.51 | -7.66 |
+| 7 | -54.18 | -10.78 |
+| 8 | -49.81 | -13.70 |
+| 9 | -44.49 | -16.35 |
 
-Linear fit: `V[1](d) = -7.43 * d + 36.07` (max residual from linear: 0.71)
+Linear fit: `V[1](d) = -3.20 * d + 11.90` (max residual from linear: 0.57)
 
-This near-linearity arises because the token embeddings lie on a small arc of a circle, and over a 62.5-degree arc, `cos(theta)` is nearly linear. The slope of -7.43 per digit means:
+This near-linearity arises because the token embeddings lie on a small arc of a circle, and over a 71.5-degree arc, `cos(theta)` is nearly linear. The slope of -3.20 per digit means:
 
-- **The average V[dim1] of two digits encodes their sum:** `avg_V[1](x, y) = -3.72 * (x + y) + 36.07`
-- **The crossover from positive to negative V[1] is at digit 4.85**, right between digits 4 and 5
-- **For a pair sum S:** avg_V[1] is positive when S < 10 (no carry) and negative when S >= 10 (carry)
+- **The average V[dim1] of two digits encodes their sum:** `avg_V[1](x, y) = -1.60 * (x + y) + 11.90`
+- **The crossover from positive to negative V[1] is at digit 3.72**, slightly lower than the 74p model's 4.85
+- **For a pair sum S:** avg_V[1] is positive when S < ~7.4 and negative when S >= ~7.4
+
+The 67p model uses smaller V magnitudes than 74p (slope -3.20 vs -7.43), compensating with different norm scaling and FFN thresholds.
 
 ### 5.3 The Rank-1 Output Projection
 
 After attention computes the weighted average of V vectors, the rank-1 output projection compresses the result:
 
 ```
-out_proj.A (5x1): [-0.018, -1.386,  0.003,  0.022, -0.043]
-out_proj.B (1x5): [-0.018, -1.593,  0.036, -0.001,  0.072]
+out_proj.A (5x1): [ 0.078, -0.810, -0.062,  0.001, -0.656]
+out_proj.B (1x5): [ 0.046, -0.716, -0.010,  0.011, -0.002]
 ```
 
-The A vector reads **almost exclusively from dimension 1** of the attention output (weight -1.386, all others < 0.043). The B vector writes **almost exclusively to dimension 1** of the residual stream (weight -1.593, all others < 0.072).
+The A vector reads primarily from **dimension 1** (-0.810) and **dimension 4** (-0.656) of the attention output. The B vector writes **almost exclusively to dimension 1** (-0.716, all others < 0.046).
 
-The effective gain is: `out_proj_gain = (-1.386) * (-1.593) = 2.208`
+The effective dim1 gain is: `out_proj_gain = (-0.810) * (-0.716) = 0.580`
 
-So the attention's contribution to the residual stream is:
-```
-delta_residual[dim1] = 2.208 * (0.5 * V[1](x_{i+1}) + 0.5 * V[1](y_{i+1}))
-```
+This is substantially smaller than the 74p model's gain of 2.208, meaning the 67p model injects a weaker attention signal into the residual stream. The model compensates with larger norm weights (dim1: 13.60 vs 6.57 in 74p).
 
-This means: **the attention mechanism computes a scalar proportional to the digit sum at the next position and writes it to dimension 1 of the residual stream.**
+The attention mechanism computes a scalar proportional to the digit sum at the next position and writes it to dimension 1 of the residual stream.
 
 ### 5.4 Residual Stream After Attention
 
@@ -334,7 +331,7 @@ For a position predicting Z[i+1], the residual stream after attention is approxi
 
 ```
 dim0 = tok_table[Z[i]][0]           (token x-coordinate, ~unchanged)
-dim1 = tok_table[Z[i]][1] + 2.208 * avg_V[1](x_{i+1}, y_{i+1})
+dim1 = tok_table[Z[i]][1] + 0.580 * avg_V[1](x_{i+1}, y_{i+1})
 dim2 = pos[i][0]                    (position, ~unchanged)
 dim3 = pos[i][1]                    (position, ~unchanged)
 dim4 = pos[i][2]                    (position, ~unchanged)
@@ -352,23 +349,26 @@ The FFN has 2 hidden units with GELU activation and no bias:
 
 ```
 fc1 (2x5): reads from normalized residual
-  Unit 0: [-0.172,  1.394, -0.512, -0.010, -0.869]
-  Unit 1: [-0.813, -1.304,  0.012,  0.185,  0.366]
+  Unit 0: [ 0.410, -0.836, -0.262,  0.024, -1.655]
+  Unit 1: [ 0.449,  0.839, -0.166, -0.116, -1.465]
 
 fc2 (5x2): writes to residual
-  Unit 0: [-0.727, -1.936,  0.072,  0.226,  1.516]
-  Unit 1: [-0.757,  2.108, -0.020,  0.149,  1.478]
+  Unit 0: [-0.951, -0.871]
+  Unit 1: [ 0.665, -0.901]
+  dim2:   [-0.002, -0.056]
+  dim3:   [ 0.005,  0.050]
+  dim4:   [-0.027, -0.048]
 ```
 
 ### 6.1 How the Two Units Specialize
 
-**Unit 0** primarily reads dim1 (weight +1.394) -- the combined token+sum signal. It activates (positive pre-GELU) when dim1 is positive, which happens when:
-- The current token Z[i] has a high y-embedding (low digit value, 0-4)
-- AND/OR the attention-injected sum is small (no carry in the next position)
+Both units read heavily from **dim4** (weights -1.655 and -1.465), which in the 67p model carries position-dependent information through the linear ramp of the sinusoidal positions (z = 0.15*i). They also read from dim1 (the combined token+sum signal) with opposite signs: unit 0 reads -0.836, unit 1 reads +0.839.
 
-When active, Unit 0 writes **negative** values to tok dims: [-0.727, -1.936]. This pushes dim1 strongly negative.
+**Unit 0** activates when dim1 is negative AND dim4 contributes a large enough offset. It writes to dim1 via fc2: 0.665 (positive push).
 
-**Unit 1** primarily reads dim0 and dim1 with negative weights [-0.813, -1.304]. It activates when both token dimensions are negative, which corresponds to digits in a specific arc region. When active, Unit 1 writes **positive** to dim1 (+2.108), pushing it upward.
+**Unit 1** activates when dim1 is positive AND dim4 contributes. It writes to dim1 via fc2: -0.901 (negative push).
+
+The two units form a push-pull pair on dim1, with their activation controlled by the sign of the combined token+sum signal — the same carry detection mechanism as the 74p model, but with different weight magnitudes and a stronger role for position-dependent signals.
 
 ### 6.2 Observed FFN Behavior
 
@@ -435,10 +435,10 @@ The output pipeline is:
 The same RMSNorm weight is shared across all three normalization points (pre-attention, pre-FFN, pre-output):
 
 ```
-norm_weight: [0.401, 6.574, 3.180, 3.114, 4.984]
+norm_weight: [7.961, 13.596, 2.398, 2.407, 3.524]
 ```
 
-The key asymmetry: **dim0 is suppressed (0.40) while dim1 is amplified (6.57)** -- a 16.4x ratio. This has different effects at different stages:
+The key feature: **dim1 is amplified most (13.60), dim0 second (7.96)** — a 1.7x ratio between them. This is much less extreme than the 74p model's 16.4x ratio (dim0 was suppressed to 0.40). The 67p model treats both token dimensions as important, while position dimensions are suppressed (2.4-3.5x).
 
 **At the output head:** The effective contribution of each dimension to the 2D token logit (after norm scaling and head_proj):
 
@@ -553,25 +553,25 @@ The 74-parameter transformer implements addition through this pipeline:
 ### Token Embedding
 
 ```
-tok_arc_A = 12.986257
-tok_arc_start = -0.532547
-tok_arc_stride = 0.121268
+tok_arc_A = 6.064079
+tok_arc_start = -0.490179
+tok_arc_stride = 0.138667
 ```
 
-### Spiral Position
+### Sinusoidal Positions (Frozen)
 
 ```
-spiral_amp = 3.562954
-spiral_phase = -0.442029
-spiral_slope = 0.169358
-spiral_offset = -2.547637
+spiral_amp = 3.500000    (frozen)
+spiral_phase = 0.000000  (frozen)
+spiral_slope = 0.150000  (frozen)
+spiral_offset = 0.000000 (frozen)
 ```
 
 ### Special Positions
 
 ```
-z_hi_pos = [36.013222, -32.833508, 6.451802]
-special_pos_equals = [2.643782, -2.413533, -1.032774]
+z_hi_pos = [3.073271, -1.403966, 15.874219]
+special_pos_equals = [3.470619, -1.040053, 0.994751]
 _plus_pos = [0, 0, 0]  (frozen)
 _eos_pos = [0, 0, 0]   (frozen)
 ```
@@ -579,42 +579,41 @@ _eos_pos = [0, 0, 0]   (frozen)
 ### Attention
 
 ```
-q_phase_angle = 0.720147
+q_phase_angle = -0.512560
 
-q_proj.weight (5x3):
-  [-3.375872,  3.042024, -0.649680]
-  [ 0.477801, -3.590906, -0.210741]
-  [-2.515178, -2.498113,  1.458350]
-  [ 3.494784,  1.676627, -0.042561]
-  [ 0.000000, -0.000000,  0.000000]
+q_proj.weight (4x3):
+  [-2.462873, -0.472051,  0.315342]
+  [-1.877643,  1.486909,  1.099144]
+  [-0.792821,  2.210805, -1.530270]
+  [ 1.481666,  2.263654,  0.268334]
 
-out_proj_A (5x1): [-0.017880, -1.386409,  0.003480,  0.022128, -0.042946]
-out_proj_B (1x5): [-0.018258, -1.592626,  0.036357, -0.001274,  0.071765]
+out_proj_A (5x1): [ 0.078231, -0.809933, -0.061855,  0.001240, -0.655522]
+out_proj_B (1x5): [ 0.046148, -0.715690, -0.009938,  0.011434, -0.002321]
 ```
 
 ### FFN
 
 ```
 fc1.weight (2x5):
-  [-0.172500,  1.393574, -0.511556, -0.009794, -0.869375]
-  [-0.812804, -1.303782,  0.011639,  0.185164,  0.366109]
+  [ 0.409873, -0.836150, -0.262240,  0.024122, -1.655446]
+  [ 0.449363,  0.839487, -0.165511, -0.115800, -1.464789]
 
 fc2.weight (5x2):
-  [-0.726745, -0.756547]
-  [-1.935689,  2.108446]
-  [ 0.072297, -0.020406]
-  [ 0.225507,  0.149272]
-  [ 1.515820,  1.478060]
+  [-0.950666, -0.871497]
+  [ 0.665394, -0.901238]
+  [-0.002438, -0.056473]
+  [ 0.005143,  0.049685]
+  [-0.026858, -0.048339]
 ```
 
 ### Output Head and Norm
 
 ```
 head_proj.weight (2x5):
-  [-21.456442,  0.279907,  1.058445,  2.535547,  12.424424]
-  [ -2.098896, -4.889176,  0.000474,  0.117969,  -0.161811]
+  [-10.044181,  0.088397, -0.537309,  0.708696, -0.114469]
+  [ -0.059638, -4.016446, -0.505348,  0.143598, -0.739328]
 
-norm_weight (5): [0.401474, 6.573721, 3.179817, 3.114479, 4.983604]
+norm_weight (5): [7.960984, 13.595810, 2.397511, 2.407397, 3.523559]
 ```
 
 ## Appendix B: Data Flow Diagram
@@ -696,26 +695,26 @@ The position map assigns each of the 34 sequence positions to a position vector:
 
 ```
 Seq pos  Label        Source      Index    Position vector
-  0      X[0]         digit       0       [3.221, -1.524, -2.548]
-  1      X[1]         digit       1       [3.501, 0.660, -2.378]
-  2      X[2]         digit       2       [2.445, 2.592, -2.209]
-  3      X[3]         digit       3       [0.454, 3.534, -2.040]
-  4      X[4]         digit       4       [-1.710, 3.126, -1.870]
-  5      X[5]         digit       5       [-3.221, 1.524, -1.701]
-  6      X[6]         digit       6       [-3.501, -0.660, -1.531]
-  7      X[7]         digit       7       [-2.445, -2.592, -1.362]
-  8      X[8]         digit       8       [-0.454, -3.534, -1.193]
-  9      X[9]         digit       9       [1.710, -3.126, -1.023]
+  0      X[0]         digit       0       [3.500, 0.000, 0.000]
+  1      X[1]         digit       1       [2.832, 2.057, 0.150]
+  2      X[2]         digit       2       [1.082, 3.329, 0.300]
+  3      X[3]         digit       3       [-1.082, 3.329, 0.450]
+  4      X[4]         digit       4       [-2.832, 2.057, 0.600]
+  5      X[5]         digit       5       [-3.500, 0.000, 0.750]
+  6      X[6]         digit       6       [-2.832, -2.057, 0.900]
+  7      X[7]         digit       7       [-1.082, -3.329, 1.050]
+  8      X[8]         digit       8       [1.082, -3.329, 1.200]
+  9      X[9]         digit       9       [2.832, -2.057, 1.350]
  10      PLUS         special     0       [0.000, 0.000, 0.000]
- 11      Y[0]         digit       0       [3.221, -1.524, -2.548]
- 12      Y[1]         digit       1       [3.501, 0.660, -2.378]
+ 11      Y[0]         digit       0       [3.500, 0.000, 0.000]
+ 12      Y[1]         digit       1       [2.832, 2.057, 0.150]
   ...    (same as X positions)
- 20      Y[9]         digit       9       [1.710, -3.126, -1.023]
- 21      EQUALS       special     1       [2.644, -2.414, -1.033]
- 22      Z[0]         digit       0       [3.221, -1.524, -2.548]
- 23      Z[1]         digit       1       [3.501, 0.660, -2.378]
+ 20      Y[9]         digit       9       [2.832, -2.057, 1.350]
+ 21      EQUALS       special     1       [3.471, -1.040, 0.995]
+ 22      Z[0]         digit       0       [3.500, 0.000, 0.000]
+ 23      Z[1]         digit       1       [2.832, 2.057, 0.150]
   ...    (same as X positions)
- 31      Z[9]         digit       9       [1.710, -3.126, -1.023]
- 32      Z[10]/carry  z_hi        0       [36.013, -32.834, 6.452]
+ 31      Z[9]         digit       9       [2.832, -2.057, 1.350]
+ 32      Z[10]/carry  z_hi        0       [3.073, -1.404, 15.874]
  33      EOS          special     2       [0.000, 0.000, 0.000]
 ```

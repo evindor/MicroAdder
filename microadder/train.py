@@ -1,11 +1,13 @@
-"""Training script for the 74-parameter MicroAdder.
+"""Training script for the MicroAdder.
 
 Usage:
-    uv run python -m microadder.train --run-name sub100_my_run --seed 45214
+    # 67p (default): sinusoidal positions, qk_dim=4
+    uv run python -m microadder.train --run-name sub100_my_run --seed 71046
 
-The winning recipe uses:
-    --carry-mix 0.8 --carry-mix-fade-start 10000 --carry-mix-fade-end 80000
-    --steps 120000 --lr 0.02 --wd-adaptive
+    # 74p: learned spiral, qk_dim=5
+    uv run python -m microadder.train --run-name sub100_my_run --seed 45214 \
+        --qk-dim 0 --freeze-spiral "" --wd-adaptive --steps 120000 \
+        --carry-mix-fade-start 10000 --carry-mix-fade-end 80000
 """
 
 import argparse
@@ -305,15 +307,25 @@ def train(model, optimizer, curriculum, args, run_dir, device):
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="MicroAdder 74p training")
+    p = argparse.ArgumentParser(description="MicroAdder training")
 
     # Run
     p.add_argument("--run-name", required=True)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
+    # Architecture
+    p.add_argument("--qk-dim", type=int, default=4,
+                   help="Q/K projection dim (0=head_dim, 4=67p, 5=74p)")
+    p.add_argument("--freeze-spiral", default="amp,phase,slope,offset",
+                   help="Spiral params to freeze (empty=learn all, 'amp,phase,slope,offset'=sinusoidal)")
+    p.add_argument("--spiral-init-amp", type=float, default=3.5)
+    p.add_argument("--spiral-init-phase", type=float, default=0.0)
+    p.add_argument("--spiral-init-slope", type=float, default=0.15)
+    p.add_argument("--spiral-init-offset", type=float, default=0.0)
+
     # Training
-    p.add_argument("--steps", type=int, default=120_000)
+    p.add_argument("--steps", type=int, default=60_000)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=0.02)
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
@@ -336,16 +348,16 @@ def parse_args():
     # Carry-mix with step-based fade
     p.add_argument("--carry-mix", type=float, default=0.8,
                    help="Fraction of carry-focused examples")
-    p.add_argument("--carry-mix-fade-start", type=int, default=10_000,
+    p.add_argument("--carry-mix-fade-start", type=int, default=15_000,
                    help="Step where carry_mix starts fading (-1 = no fade)")
-    p.add_argument("--carry-mix-fade-end", type=int, default=80_000,
+    p.add_argument("--carry-mix-fade-end", type=int, default=45_000,
                    help="Step where carry_mix reaches 0")
 
     # Curriculum
     p.add_argument("--curriculum", default="1-3:2000,1-6:5000,1-10:rest")
 
     # Evaluation
-    p.add_argument("--eval-interval", type=int, default=3000)
+    p.add_argument("--eval-interval", type=int, default=2000)
     p.add_argument("--eval-samples", type=int, default=5000)
 
     return p.parse_args()
@@ -363,7 +375,14 @@ def main():
     device = torch.device(args.device)
 
     # Model
-    cfg = ModelConfig()
+    cfg = ModelConfig(
+        qk_dim=args.qk_dim,
+        freeze_spiral=args.freeze_spiral,
+        spiral_init_amp=args.spiral_init_amp,
+        spiral_init_phase=args.spiral_init_phase,
+        spiral_init_slope=args.spiral_init_slope,
+        spiral_init_offset=args.spiral_init_offset,
+    )
     model = MicroAdder(cfg).to(device)
     n_params = count_params(model)
     print(f"Model: {n_params} parameters")
@@ -389,7 +408,7 @@ def main():
 
     # Save config
     with open(run_dir / "config.json", "w") as f:
-        json.dump({**cfg.to_dict(), **vars(args)}, f, indent=2)
+        json.dump({"model": cfg.to_dict(), "args": vars(args)}, f, indent=2)
 
     # Train
     train(model, optimizer, curriculum, args, run_dir, device)

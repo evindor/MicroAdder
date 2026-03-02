@@ -22,13 +22,23 @@ import torch.nn.functional as F
 
 from .model import ModelConfig, MicroAdder, count_parameters, parameter_breakdown
 from .data import (
-    VOCAB_SIZE, PROMPT_LEN, ANSWER_LEN, SEQ_LEN,
-    sample_batch, parse_curriculum, get_digit_range, make_example, decode_answer,
-    EOS, MAX_DIGITS, get_token_ids,
+    VOCAB_SIZE,
+    PROMPT_LEN,
+    ANSWER_LEN,
+    SEQ_LEN,
+    sample_batch,
+    parse_curriculum,
+    get_digit_range,
+    make_example,
+    decode_answer,
+    EOS,
+    MAX_DIGITS,
+    get_token_ids,
 )
 
 
 # ── LR schedule ────────────────────────────────────────────────────────────
+
 
 def get_lr(step: int, args) -> float:
     """Cosine decay with linear warmup."""
@@ -40,7 +50,9 @@ def get_lr(step: int, args) -> float:
     return min_lr + (args.lr - min_lr) * cosine
 
 
-def effective_weight_decay(base_wd: float, val_exact: float, tok_acc: float, args) -> float:
+def effective_weight_decay(
+    base_wd: float, val_exact: float, tok_acc: float, args
+) -> float:
     """Adaptive weight decay: drop WD when grokking signals appear.
 
     Uses val_exact as the primary signal (rising val_exact = circuit found)
@@ -66,7 +78,9 @@ def effective_weight_decay(base_wd: float, val_exact: float, tok_acc: float, arg
     return base_wd
 
 
-def smooth_weight_decay(base_wd: float, step: int, onset_step: int, alpha: float, floor: float) -> float:
+def smooth_weight_decay(
+    base_wd: float, step: int, onset_step: int, alpha: float, floor: float
+) -> float:
     """Smooth exponential WD decay after grokking onset (ratcheted — never goes back up).
 
     wd = base_wd * exp(-alpha * (step - onset_step)), clamped to floor.
@@ -76,6 +90,7 @@ def smooth_weight_decay(base_wd: float, step: int, onset_step: int, alpha: float
 
 
 # ── SAM (Sharpness-Aware Minimization) ────────────────────────────────────
+
 
 class SAM:
     """Lightweight SAM wrapper around any base optimizer.
@@ -128,12 +143,14 @@ class SAM:
 
     def _grad_norm(self):
         norm = torch.norm(
-            torch.stack([
-                p.grad.norm()
-                for group in self.param_groups
-                for p in group["params"]
-                if p.grad is not None
-            ])
+            torch.stack(
+                [
+                    p.grad.norm()
+                    for group in self.param_groups
+                    for p in group["params"]
+                    if p.grad is not None
+                ]
+            )
         )
         return norm
 
@@ -146,7 +163,7 @@ def check_wd_onset(val_exact: float, tok_acc: float, args) -> bool:
 def scheduled_weight_decay(base_wd: float, step: int, args) -> float:
     """Drop WD at fixed steps, ignoring metrics. Breaks chicken-and-egg problem."""
     if step >= args.wd_sched_step2:
-        return base_wd * args.wd_drop_factor ** 2
+        return base_wd * args.wd_drop_factor**2
     if step >= args.wd_sched_step1:
         return base_wd * args.wd_drop_factor
     return base_wd
@@ -154,12 +171,14 @@ def scheduled_weight_decay(base_wd: float, step: int, args) -> float:
 
 def cyclical_weight_decay(base_wd: float, step: int, args) -> float:
     """Cosine oscillation between base_wd and base_wd * factor²."""
-    floor = base_wd * args.wd_drop_factor ** 2
+    floor = base_wd * args.wd_drop_factor**2
     t = (step % args.wd_cycle_period) / args.wd_cycle_period
     return floor + (base_wd - floor) * (1 + math.cos(2 * math.pi * t)) / 2
 
 
-def warmup_weight_decay(base_wd: float, step: int, val_exact: float, tok_acc: float, args) -> float:
+def warmup_weight_decay(
+    base_wd: float, step: int, val_exact: float, tok_acc: float, args
+) -> float:
     """WD=0 for first N steps, then linear ramp, then adaptive drops."""
     if step < args.wd_warmup_steps:
         return 0.0
@@ -187,7 +206,9 @@ def effective_carry_mix(base_mix: float, step: int, tok_acc: float, args) -> flo
             return base_mix
         if step >= args.carry_mix_fade_end:
             return 0.0
-        frac = (step - args.carry_mix_fade_start) / (args.carry_mix_fade_end - args.carry_mix_fade_start)
+        frac = (step - args.carry_mix_fade_start) / (
+            args.carry_mix_fade_end - args.carry_mix_fade_start
+        )
         return base_mix * (1.0 - frac)
     # Metric-based schedule (original)
     if step >= args.carry_mix_max_steps:
@@ -201,7 +222,28 @@ def effective_carry_mix(base_mix: float, step: int, tok_acc: float, args) -> flo
     return base_mix * (args.carry_mix_tok_acc_zero - tok_acc) / span
 
 
+def effective_borrow_mix(base_mix: float, step: int, args) -> float:
+    """Step-based linear fade of borrow_mix from base_mix to 0.
+
+    Mirrors carry_mix fade but uses borrow-specific args.
+    Only step-based fade (no metric-based) since that's the winning recipe.
+    """
+    if base_mix <= 0:
+        return 0.0
+    if args.borrow_mix_fade_start < 0:
+        return base_mix  # no fade configured
+    if step <= args.borrow_mix_fade_start:
+        return base_mix
+    if step >= args.borrow_mix_fade_end:
+        return 0.0
+    frac = (step - args.borrow_mix_fade_start) / (
+        args.borrow_mix_fade_end - args.borrow_mix_fade_start
+    )
+    return base_mix * (1.0 - frac)
+
+
 # ── Scaffold L1 schedule ──────────────────────────────────────────────────
+
 
 def get_scaffold_lambda(step: int, args) -> float:
     """Ramp scaffold L1 penalty from 0 to scaffold_lambda between anneal_start and anneal_end."""
@@ -209,13 +251,16 @@ def get_scaffold_lambda(step: int, args) -> float:
         return 0.0
     if step >= args.scaffold_anneal_end:
         return args.scaffold_lambda
-    progress = (step - args.scaffold_anneal_start) / (args.scaffold_anneal_end - args.scaffold_anneal_start)
+    progress = (step - args.scaffold_anneal_start) / (
+        args.scaffold_anneal_end - args.scaffold_anneal_start
+    )
     if args.scaffold_schedule == "quadratic":
         progress = progress * progress
     return args.scaffold_lambda * progress
 
 
 # ── Autoregressive training loss ──────────────────────────────────────────
+
 
 def ar_training_loss(
     model: MicroAdder,
@@ -262,14 +307,14 @@ def ar_training_loss(
     for t in range(prompt_len - 1, T):
         # Clone the prefix so in-place edits to ar_tokens don't invalidate
         # the autograd graph from this forward pass.
-        step_input = ar_tokens[:, :t + 1].clone()
+        step_input = ar_tokens[:, : t + 1].clone()
         logits, _ = model(step_input)
 
         tgt = batch_target[:, t]  # (B,)
         mask = tgt != -100
         if mask.any():
             pos_logits = logits[:, t]  # (B, vocab_size)
-            loss_t = F.cross_entropy(pos_logits[mask], tgt[mask], reduction='sum')
+            loss_t = F.cross_entropy(pos_logits[mask], tgt[mask], reduction="sum")
             total_loss = total_loss + loss_t
             n_tokens += mask.sum().item()
 
@@ -286,6 +331,7 @@ def ar_training_loss(
 
 # ── Grokfast gradient filter ───────────────────────────────────────────
 
+
 def gradfilter_ema(
     model: torch.nn.Module,
     grads: dict | None = None,
@@ -298,7 +344,11 @@ def gradfilter_ema(
     Call after loss.backward(), before optimizer.step().
     """
     if grads is None:
-        grads = {n: p.grad.data.detach().clone() for n, p in model.named_parameters() if p.requires_grad and p.grad is not None}
+        grads = {
+            n: p.grad.data.detach().clone()
+            for n, p in model.named_parameters()
+            if p.requires_grad and p.grad is not None
+        }
     else:
         for n, p in model.named_parameters():
             if p.requires_grad and p.grad is not None:
@@ -308,6 +358,7 @@ def gradfilter_ema(
 
 
 # ── Evaluation ─────────────────────────────────────────────────────────────
+
 
 @torch.no_grad()
 def evaluate(
@@ -389,13 +440,16 @@ def evaluate_autoregressive(
         if predicted == expected:
             correct += 1
         if (i + 1) % 500 == 0:
-            print(f"  AR eval: {i+1}/{n_samples} done, {correct}/{i+1} correct ({correct/(i+1):.4f})")
+            print(
+                f"  AR eval: {i + 1}/{n_samples} done, {correct}/{i + 1} correct ({correct / (i + 1):.4f})"
+            )
 
     model.train()
     return {"exact_match": correct / n_samples, "n_samples": n_samples}
 
 
 # ── Jiggle ─────────────────────────────────────────────────────────────────
+
 
 def perturb_model(
     model: MicroAdder,
@@ -456,7 +510,9 @@ def _settle_and_track(
     come purely from the perturbation, not batch randomness.
     """
     temp_optim = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=args.weight_decay,
+        model.parameters(),
+        lr=lr,
+        weight_decay=args.weight_decay,
     )
     trajectory = []
     model.train()
@@ -464,8 +520,13 @@ def _settle_and_track(
     for s in range(settle_steps):
         min_d, max_d = get_digit_range(main_step, curriculum)
         batch_input, batch_target = sample_batch(
-            args.batch_size, min_d, max_d, data_rng, device,
+            args.batch_size,
+            min_d,
+            max_d,
+            data_rng,
+            device,
             carry_mix=args.carry_mix,
+            borrow_mix=args.borrow_mix,
             vocab_size=model.cfg.vocab_size,
             task=args.task,
         )
@@ -478,13 +539,21 @@ def _settle_and_track(
 
         # Periodic eval (always include the final step)
         if (s + 1) % eval_interval == 0 or s == settle_steps - 1:
-            metrics = evaluate(model, args.eval_samples, seed=2025, device=device,
-                              vocab_size=model.cfg.vocab_size, task=args.task)
-            trajectory.append({
-                "settle_step": s + 1,
-                "exact_match": metrics["exact_match"],
-                "token_accuracy": metrics["token_accuracy"],
-            })
+            metrics = evaluate(
+                model,
+                args.eval_samples,
+                seed=2025,
+                device=device,
+                vocab_size=model.cfg.vocab_size,
+                task=args.task,
+            )
+            trajectory.append(
+                {
+                    "settle_step": s + 1,
+                    "exact_match": metrics["exact_match"],
+                    "token_accuracy": metrics["token_accuracy"],
+                }
+            )
 
     return trajectory
 
@@ -553,52 +622,79 @@ def run_jiggle_event(
     # exact same batch sequence — differences come only from weights.
     data_seed = args.seed + step * 7919
 
-    log_fn(f"[jiggle] step={step} lr={current_lr:.2e} sigma={sigma:.2e} "
-           f"candidates={args.jiggle_candidates}+control "
-           f"settle={args.jiggle_settle_steps}")
+    log_fn(
+        f"[jiggle] step={step} lr={current_lr:.2e} sigma={sigma:.2e} "
+        f"candidates={args.jiggle_candidates}+control "
+        f"settle={args.jiggle_settle_steps}"
+    )
 
     candidates = []
 
     # ── Control: normal continued training (no perturbation) ───────────
     model.load_state_dict(copy.deepcopy(base_model_state))
     trajectory = _settle_and_track(
-        model, current_lr, args.jiggle_settle_steps, settle_eval_every,
-        args, curriculum, step, random.Random(data_seed), device,
+        model,
+        current_lr,
+        args.jiggle_settle_steps,
+        settle_eval_every,
+        args,
+        curriculum,
+        step,
+        random.Random(data_seed),
+        device,
     )
     score, details = _compute_score(trajectory)
-    candidates.append({
-        "label": "control",
-        "score": score,
-        "details": details,
-        "model_state": copy.deepcopy(model.state_dict()),
-    })
-    log_fn(f"[jiggle]   control:   score={score:.4f}  "
-           f"exact={details['final_exact']:.6f}  "
-           f"tok={details['final_tok_acc']:.4f}  "
-           f"stab={details['stability']:.3f}")
+    candidates.append(
+        {
+            "label": "control",
+            "score": score,
+            "details": details,
+            "model_state": copy.deepcopy(model.state_dict()),
+        }
+    )
+    log_fn(
+        f"[jiggle]   control:   score={score:.4f}  "
+        f"exact={details['final_exact']:.6f}  "
+        f"tok={details['final_tok_acc']:.4f}  "
+        f"stab={details['stability']:.3f}"
+    )
 
     # ── Jiggle candidates ──────────────────────────────────────────────
     for cand_id in range(args.jiggle_candidates):
         model.load_state_dict(copy.deepcopy(base_model_state))
         perturb_model(
-            model, sigma=sigma, fraction=args.jiggle_fraction,
-            scope=args.jiggle_scope, seed=step * 1000 + cand_id,
+            model,
+            sigma=sigma,
+            fraction=args.jiggle_fraction,
+            scope=args.jiggle_scope,
+            seed=step * 1000 + cand_id,
         )
         trajectory = _settle_and_track(
-            model, current_lr, args.jiggle_settle_steps, settle_eval_every,
-            args, curriculum, step, random.Random(data_seed), device,
+            model,
+            current_lr,
+            args.jiggle_settle_steps,
+            settle_eval_every,
+            args,
+            curriculum,
+            step,
+            random.Random(data_seed),
+            device,
         )
         score, details = _compute_score(trajectory)
-        candidates.append({
-            "label": f"jiggle_{cand_id}",
-            "score": score,
-            "details": details,
-            "model_state": copy.deepcopy(model.state_dict()),
-        })
-        log_fn(f"[jiggle]   jiggle_{cand_id}: score={score:.4f}  "
-               f"exact={details['final_exact']:.6f}  "
-               f"tok={details['final_tok_acc']:.4f}  "
-               f"stab={details['stability']:.3f}")
+        candidates.append(
+            {
+                "label": f"jiggle_{cand_id}",
+                "score": score,
+                "details": details,
+                "model_state": copy.deepcopy(model.state_dict()),
+            }
+        )
+        log_fn(
+            f"[jiggle]   jiggle_{cand_id}: score={score:.4f}  "
+            f"exact={details['final_exact']:.6f}  "
+            f"tok={details['final_tok_acc']:.4f}  "
+            f"stab={details['stability']:.3f}"
+        )
 
     # ── Promote best ───────────────────────────────────────────────────
     best = max(candidates, key=lambda c: c["score"])
@@ -611,13 +707,12 @@ def run_jiggle_event(
         "promoted": best["label"],
         "promoted_score": best["score"],
         "control_score": candidates[0]["score"],
-        "all_candidates": [
-            {"label": c["label"], **c["details"]} for c in candidates
-        ],
+        "all_candidates": [{"label": c["label"], **c["details"]} for c in candidates],
     }
 
 
 # ── Training loop ──────────────────────────────────────────────────────────
+
 
 def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
     metrics_path = run_dir / "metrics.csv"
@@ -626,14 +721,28 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
     # CSV logger
     with open(metrics_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["step", "loss", "lr", "val_exact", "val_token_acc",
-                         "wall_time", "min_digits", "max_digits"])
+        writer.writerow(
+            [
+                "step",
+                "loss",
+                "lr",
+                "val_exact",
+                "val_token_acc",
+                "wall_time",
+                "min_digits",
+                "max_digits",
+            ]
+        )
 
     # Scaffold state
     scaffold_active = target_cfg is not None
     scaffold_pruned = False
     scaffold_prune_step = None
-    scaffold_freeze_params = [p.strip() for p in args.scaffold_freeze.split(",") if p.strip()] if args.scaffold_freeze else []
+    scaffold_freeze_params = (
+        [p.strip() for p in args.scaffold_freeze.split(",") if p.strip()]
+        if args.scaffold_freeze
+        else []
+    )
     scaffold_freeze_done = False
     scaffold_freeze_first_hit = None  # step when val_exact first exceeded threshold
     n_frozen_params = 0  # number of params frozen by scaffold-freeze
@@ -644,11 +753,18 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
     def log_metrics(step, loss_val, lr, metrics, t0, min_d, max_d):
         with open(metrics_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                step, f"{loss_val:.6f}", f"{lr:.2e}",
-                f"{metrics['exact_match']:.6f}", f"{metrics['token_accuracy']:.4f}",
-                f"{time.time() - t0:.1f}", min_d, max_d,
-            ])
+            writer.writerow(
+                [
+                    step,
+                    f"{loss_val:.6f}",
+                    f"{lr:.2e}",
+                    f"{metrics['exact_match']:.6f}",
+                    f"{metrics['token_accuracy']:.4f}",
+                    f"{time.time() - t0:.1f}",
+                    min_d,
+                    max_d,
+                ]
+            )
 
     rng_data = random.Random(args.seed)
     best_exact = -1.0
@@ -665,13 +781,15 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
     model.train()
     for step in range(args.steps):
         # ── Jiggle event ───────────────────────────────────────────────
-        if (
-            args.jiggle
-            and step > 0
-            and step % args.jiggle_interval == 0
-        ):
+        if args.jiggle and step > 0 and step % args.jiggle_interval == 0:
             jiggle_result = run_jiggle_event(
-                model, optimizer, step, args, curriculum, device, log,
+                model,
+                optimizer,
+                step,
+                args,
+                curriculum,
+                device,
+                log,
             )
             # Log jiggle event to separate file
             jiggle_log = run_dir / "jiggle_events.csv"
@@ -679,26 +797,39 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
             with open(jiggle_log, "a", newline="") as f:
                 writer = csv.writer(f)
                 if header_needed:
-                    writer.writerow([
-                        "step", "promoted", "promoted_score",
-                        "control_score", "candidates_json",
-                    ])
-                writer.writerow([
-                    step,
-                    jiggle_result["promoted"],
-                    f"{jiggle_result['promoted_score']:.6f}",
-                    f"{jiggle_result['control_score']:.6f}",
-                    json.dumps(jiggle_result["all_candidates"]),
-                ])
+                    writer.writerow(
+                        [
+                            "step",
+                            "promoted",
+                            "promoted_score",
+                            "control_score",
+                            "candidates_json",
+                        ]
+                    )
+                writer.writerow(
+                    [
+                        step,
+                        jiggle_result["promoted"],
+                        f"{jiggle_result['promoted_score']:.6f}",
+                        f"{jiggle_result['control_score']:.6f}",
+                        json.dumps(jiggle_result["all_candidates"]),
+                    ]
+                )
 
         # ── Curriculum digit range ─────────────────────────────────────
         min_d, max_d = get_digit_range(step, curriculum)
 
         # ── Forward / backward ─────────────────────────────────────────
         carry_mix = effective_carry_mix(args.carry_mix, step, last_tok_acc, args)
+        borrow_mix = effective_borrow_mix(args.borrow_mix, step, args)
         batch_input, batch_target = sample_batch(
-            args.batch_size, min_d, max_d, rng_data, device,
+            args.batch_size,
+            min_d,
+            max_d,
+            rng_data,
+            device,
             carry_mix=carry_mix,
+            borrow_mix=borrow_mix,
             vocab_size=model.cfg.vocab_size,
             task=args.task,
         )
@@ -713,9 +844,11 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
         # Update LR + weight decay before step
         lr = get_lr(step, args)
         # Post-prune LR warmup
-        if (scaffold_prune_step is not None
-                and args.scaffold_warmup_steps > 0
-                and step < scaffold_prune_step + args.scaffold_warmup_steps):
+        if (
+            scaffold_prune_step is not None
+            and args.scaffold_warmup_steps > 0
+            and step < scaffold_prune_step + args.scaffold_warmup_steps
+        ):
             warmup_frac = (step - scaffold_prune_step + 1) / args.scaffold_warmup_steps
             lr = lr * warmup_frac
         if args.wd_mode == "scheduled":
@@ -723,13 +856,18 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
         elif args.wd_mode == "cyclical":
             wd = cyclical_weight_decay(args.weight_decay, step, args)
         elif args.wd_mode == "warmup":
-            wd = warmup_weight_decay(args.weight_decay, step, last_val_exact, last_tok_acc, args)
+            wd = warmup_weight_decay(
+                args.weight_decay, step, last_val_exact, last_tok_acc, args
+            )
         elif args.wd_smooth and wd_onset_step is not None:
             wd_floor = args.weight_decay * args.wd_drop_factor * args.wd_drop_factor
-            wd = smooth_weight_decay(args.weight_decay, step, wd_onset_step,
-                                     args.wd_smooth_alpha, wd_floor)
+            wd = smooth_weight_decay(
+                args.weight_decay, step, wd_onset_step, args.wd_smooth_alpha, wd_floor
+            )
         else:
-            wd = effective_weight_decay(args.weight_decay, last_val_exact, last_tok_acc, args)
+            wd = effective_weight_decay(
+                args.weight_decay, last_val_exact, last_tok_acc, args
+            )
         for pg in optimizer.param_groups:
             pg["lr"] = lr
             pg["weight_decay"] = wd
@@ -759,8 +897,10 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
             # Grokfast on second pass gradients
             if args.grokfast:
                 grokfast_grads = gradfilter_ema(
-                    model, grokfast_grads,
-                    alpha=args.grokfast_alpha, lamb=args.grokfast_lamb,
+                    model,
+                    grokfast_grads,
+                    alpha=args.grokfast_alpha,
+                    lamb=args.grokfast_lamb,
                 )
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -780,8 +920,10 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
 
             if args.grokfast:
                 grokfast_grads = gradfilter_ema(
-                    model, grokfast_grads,
-                    alpha=args.grokfast_alpha, lamb=args.grokfast_lamb,
+                    model,
+                    grokfast_grads,
+                    alpha=args.grokfast_alpha,
+                    lamb=args.grokfast_lamb,
                 )
             if args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -793,14 +935,15 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
         running_loss += loss.item()
 
         # ── Scaffold hard prune ───────────────────────────────────────
-        if (scaffold_active and not scaffold_pruned
-                and step >= args.scaffold_anneal_end):
+        if scaffold_active and not scaffold_pruned and step >= args.scaffold_anneal_end:
             # Check if scaffold weights are small enough to prune
             if scaffold_l1_val == 0.0:
                 # Recompute L1 for the threshold check
                 scaffold_l1_val = model.get_scaffold_l1(target_cfg).item()
-            prune_ok = (args.scaffold_prune_threshold <= 0
-                        or scaffold_l1_val < args.scaffold_prune_threshold)
+            prune_ok = (
+                args.scaffold_prune_threshold <= 0
+                or scaffold_l1_val < args.scaffold_prune_threshold
+            )
             if prune_ok:
                 log(f"  [scaffold] PRUNING at step {step}: L1={scaffold_l1_val:.4f}")
                 model.prune_scaffold(target_cfg)
@@ -809,12 +952,17 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
                 # Rebuild optimizer (momentum/variance invalid after prune)
                 if args.sam:
                     optimizer = SAM(
-                        model.parameters(), torch.optim.AdamW,
-                        rho=args.sam_rho, lr=lr, weight_decay=wd,
+                        model.parameters(),
+                        torch.optim.AdamW,
+                        rho=args.sam_rho,
+                        lr=lr,
+                        weight_decay=wd,
                     )
                 else:
                     optimizer = torch.optim.AdamW(
-                        model.parameters(), lr=lr, weight_decay=wd,
+                        model.parameters(),
+                        lr=lr,
+                        weight_decay=wd,
                     )
                 scaffold_pruned = True
                 scaffold_prune_step = step
@@ -823,19 +971,34 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
         if step > 0 and step % log_interval == 0:
             avg_loss = running_loss / log_interval
             elapsed = time.time() - t0
-            log(f"step {step:>7d} | loss {avg_loss:.4f} | lr {lr:.2e} | "
-                f"digits {min_d}-{max_d} | {elapsed:.0f}s")
+            log(
+                f"step {step:>7d} | loss {avg_loss:.4f} | lr {lr:.2e} | "
+                f"digits {min_d}-{max_d} | {elapsed:.0f}s"
+            )
             running_loss = 0.0
 
         # ── Evaluation + checkpointing ─────────────────────────────────
         if step > 0 and step % args.eval_interval == 0:
-            metrics = evaluate(model, args.eval_samples, seed=2025, device=device,
-                              vocab_size=model.cfg.vocab_size, task=args.task)
+            metrics = evaluate(
+                model,
+                args.eval_samples,
+                seed=2025,
+                device=device,
+                vocab_size=model.cfg.vocab_size,
+                task=args.task,
+            )
             last_tok_acc = metrics["token_accuracy"]
             last_val_exact = metrics["exact_match"]
             elapsed = time.time() - t0
             carry_str = f" | carry_mix {carry_mix:.3f}" if args.carry_mix > 0 else ""
-            wd_str = f" | wd {wd:.2e}" if (args.wd_adaptive or args.wd_smooth or args.wd_mode != "adaptive") else ""
+            borrow_str = (
+                f" | borrow_mix {borrow_mix:.3f}" if args.borrow_mix > 0 else ""
+            )
+            wd_str = (
+                f" | wd {wd:.2e}"
+                if (args.wd_adaptive or args.wd_smooth or args.wd_mode != "adaptive")
+                else ""
+            )
             scaffold_str = ""
             if scaffold_freeze_done:
                 scaffold_str = f" | scaffold=frozen({n_frozen_params}p)"
@@ -845,79 +1008,129 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
                 scaffold_str = " | scaffold=pruned"
             elif scaffold_freeze_params:
                 scaffold_str = f" | scaffold=freeze_pending"
-            log(f"  EVAL step {step:>7d} | exact {metrics['exact_match']:.6f} | "
-                f"tok_acc {metrics['token_accuracy']:.4f}{carry_str}{wd_str}{scaffold_str} | {elapsed:.0f}s")
+            log(
+                f"  EVAL step {step:>7d} | exact {metrics['exact_match']:.6f} | "
+                f"tok_acc {metrics['token_accuracy']:.4f}{carry_str}{borrow_str}{wd_str}{scaffold_str} | {elapsed:.0f}s"
+            )
             log_metrics(step, loss.item(), lr, metrics, t0, min_d, max_d)
 
             # Log WD transitions
             if args.wd_smooth:
-                if wd_onset_step is None and check_wd_onset(last_val_exact, last_tok_acc, args):
+                if wd_onset_step is None and check_wd_onset(
+                    last_val_exact, last_tok_acc, args
+                ):
                     wd_onset_step = step
-                    log(f"  [wd-smooth] ONSET at step {step}: beginning exponential decay "
+                    log(
+                        f"  [wd-smooth] ONSET at step {step}: beginning exponential decay "
                         f"(alpha={args.wd_smooth_alpha}, val_exact={last_val_exact:.4f}, "
-                        f"tok_acc={last_tok_acc:.4f})")
+                        f"tok_acc={last_tok_acc:.4f})"
+                    )
             elif args.wd_adaptive:
-                new_wd = effective_weight_decay(args.weight_decay, last_val_exact, last_tok_acc, args)
+                new_wd = effective_weight_decay(
+                    args.weight_decay, last_val_exact, last_tok_acc, args
+                )
                 new_stage = 0
-                if new_wd <= args.weight_decay * args.wd_drop_factor * args.wd_drop_factor * 1.01:
+                if (
+                    new_wd
+                    <= args.weight_decay
+                    * args.wd_drop_factor
+                    * args.wd_drop_factor
+                    * 1.01
+                ):
                     new_stage = 2
                 elif new_wd <= args.weight_decay * args.wd_drop_factor * 1.01:
                     new_stage = 1
                 if new_stage > wd_stage:
                     wd_stage = new_stage
-                    log(f"  [wd-adaptive] STAGE {wd_stage}: wd {args.weight_decay:.2e} -> {new_wd:.2e} "
-                        f"(val_exact={last_val_exact:.4f}, tok_acc={last_tok_acc:.4f})")
+                    log(
+                        f"  [wd-adaptive] STAGE {wd_stage}: wd {args.weight_decay:.2e} -> {new_wd:.2e} "
+                        f"(val_exact={last_val_exact:.4f}, tok_acc={last_tok_acc:.4f})"
+                    )
 
             # Scaffold freeze trigger (metric-based)
             if scaffold_freeze_params and not scaffold_freeze_done:
                 if metrics["exact_match"] >= args.scaffold_freeze_exact:
                     if scaffold_freeze_first_hit is None:
                         scaffold_freeze_first_hit = step
-                        log(f"  [scaffold-freeze] val_exact={metrics['exact_match']:.4f} >= "
-                            f"{args.scaffold_freeze_exact} first hit at step {step}")
+                        log(
+                            f"  [scaffold-freeze] val_exact={metrics['exact_match']:.4f} >= "
+                            f"{args.scaffold_freeze_exact} first hit at step {step}"
+                        )
                     if step - scaffold_freeze_first_hit >= args.scaffold_freeze_hold:
                         # Freeze!
                         n_before = count_parameters(model)
                         n_frozen_params = model.freeze_params(scaffold_freeze_params)
                         n_after = count_parameters(model)
-                        log(f"  [scaffold-freeze] FREEZING {len(scaffold_freeze_params)} params "
-                            f"({n_frozen_params} values) at step {step}")
-                        log(f"  [scaffold-freeze] Params: {n_before} -> {n_after} learnable")
+                        log(
+                            f"  [scaffold-freeze] FREEZING {len(scaffold_freeze_params)} params "
+                            f"({n_frozen_params} values) at step {step}"
+                        )
+                        log(
+                            f"  [scaffold-freeze] Params: {n_before} -> {n_after} learnable"
+                        )
                         # Rebuild optimizer (frozen params no longer in model.parameters())
                         if args.sam:
                             optimizer = SAM(
-                                model.parameters(), torch.optim.AdamW,
-                                rho=args.sam_rho, lr=lr, weight_decay=wd,
+                                model.parameters(),
+                                torch.optim.AdamW,
+                                rho=args.sam_rho,
+                                lr=lr,
+                                weight_decay=wd,
                             )
                         else:
                             optimizer = torch.optim.AdamW(
-                                model.parameters(), lr=lr, weight_decay=wd,
+                                model.parameters(),
+                                lr=lr,
+                                weight_decay=wd,
                             )
                         scaffold_freeze_done = True
                         # Save pre-freeze checkpoint
-                        _save_checkpoint(model, optimizer, step, metrics, args,
-                                         ckpt_dir / "freeze.pt",
-                                         scaffold_pruned=scaffold_pruned, target_cfg=target_cfg,
-                                         scaffold_freeze_done=True)
+                        _save_checkpoint(
+                            model,
+                            optimizer,
+                            step,
+                            metrics,
+                            args,
+                            ckpt_dir / "freeze.pt",
+                            scaffold_pruned=scaffold_pruned,
+                            target_cfg=target_cfg,
+                            scaffold_freeze_done=True,
+                        )
                 else:
                     if scaffold_freeze_first_hit is not None:
-                        log(f"  [scaffold-freeze] val_exact dropped below {args.scaffold_freeze_exact}, "
-                            f"resetting hold counter (was at step {scaffold_freeze_first_hit})")
+                        log(
+                            f"  [scaffold-freeze] val_exact dropped below {args.scaffold_freeze_exact}, "
+                            f"resetting hold counter (was at step {scaffold_freeze_first_hit})"
+                        )
                         scaffold_freeze_first_hit = None
 
             # Save last
-            _save_checkpoint(model, optimizer, step, metrics, args,
-                             ckpt_dir / "last.pt",
-                             scaffold_pruned=scaffold_pruned, target_cfg=target_cfg,
-                             scaffold_freeze_done=scaffold_freeze_done)
+            _save_checkpoint(
+                model,
+                optimizer,
+                step,
+                metrics,
+                args,
+                ckpt_dir / "last.pt",
+                scaffold_pruned=scaffold_pruned,
+                target_cfg=target_cfg,
+                scaffold_freeze_done=scaffold_freeze_done,
+            )
 
             # Save best
             if metrics["exact_match"] > best_exact:
                 best_exact = metrics["exact_match"]
-                _save_checkpoint(model, optimizer, step, metrics, args,
-                                 ckpt_dir / "best.pt",
-                                 scaffold_pruned=scaffold_pruned, target_cfg=target_cfg,
-                                 scaffold_freeze_done=scaffold_freeze_done)
+                _save_checkpoint(
+                    model,
+                    optimizer,
+                    step,
+                    metrics,
+                    args,
+                    ckpt_dir / "best.pt",
+                    scaffold_pruned=scaffold_pruned,
+                    target_cfg=target_cfg,
+                    scaffold_freeze_done=scaffold_freeze_done,
+                )
                 log(f"  NEW BEST: {best_exact:.6f}")
 
             # Early stopping: stop if val_exact == 1.0 for 10K steps
@@ -926,25 +1139,53 @@ def train(model, optimizer, curriculum, args, run_dir, device, target_cfg=None):
                     perfect_since_step = step
                     log(f"  [early-stop] val_exact=1.0 first seen at step {step}")
                 elif step - perfect_since_step >= 10_000:
-                    log(f"  [early-stop] val_exact=1.0 held for {step - perfect_since_step} steps. Stopping.")
+                    log(
+                        f"  [early-stop] val_exact=1.0 held for {step - perfect_since_step} steps. Stopping."
+                    )
                     break
             else:
                 if perfect_since_step is not None:
-                    log(f"  [early-stop] val_exact dropped below 1.0, resetting (was perfect since step {perfect_since_step})")
+                    log(
+                        f"  [early-stop] val_exact dropped below 1.0, resetting (was perfect since step {perfect_since_step})"
+                    )
                 perfect_since_step = None
 
     # Final eval
-    final = evaluate(model, args.eval_samples, seed=2025, device=device,
-                     vocab_size=model.cfg.vocab_size, task=args.task)
-    log(f"FINAL | exact {final['exact_match']:.6f} | tok_acc {final['token_accuracy']:.4f}")
-    _save_checkpoint(model, optimizer, args.steps, final, args, ckpt_dir / "last.pt",
-                     scaffold_pruned=scaffold_pruned, target_cfg=target_cfg,
-                     scaffold_freeze_done=scaffold_freeze_done)
+    final = evaluate(
+        model,
+        args.eval_samples,
+        seed=2025,
+        device=device,
+        vocab_size=model.cfg.vocab_size,
+        task=args.task,
+    )
+    log(
+        f"FINAL | exact {final['exact_match']:.6f} | tok_acc {final['token_accuracy']:.4f}"
+    )
+    _save_checkpoint(
+        model,
+        optimizer,
+        args.steps,
+        final,
+        args,
+        ckpt_dir / "last.pt",
+        scaffold_pruned=scaffold_pruned,
+        target_cfg=target_cfg,
+        scaffold_freeze_done=scaffold_freeze_done,
+    )
 
 
-def _save_checkpoint(model, optimizer, step, metrics, args, path,
-                     scaffold_pruned=False, target_cfg=None,
-                     scaffold_freeze_done=False):
+def _save_checkpoint(
+    model,
+    optimizer,
+    step,
+    metrics,
+    args,
+    path,
+    scaffold_pruned=False,
+    target_cfg=None,
+    scaffold_freeze_done=False,
+):
     ckpt = {
         "step": step,
         "model_state_dict": model.state_dict(),
@@ -966,6 +1207,7 @@ def _save_checkpoint(model, optimizer, step, metrics, args, path,
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="MicroAdder training")
 
@@ -984,53 +1226,186 @@ def parse_args():
     p.add_argument("--ffn-dim", type=int, default=2)
     p.add_argument("--ffn-bias", action="store_true", default=True)
     p.add_argument("--no-ffn-bias", dest="ffn_bias", action="store_false")
-    p.add_argument("--pos-mode", default="learned", choices=["learned", "spiral_correct", "zero"])
-    p.add_argument("--pos-correction-mode", default="full", choices=["full", "linear", "none"],
-                   help="Position correction: 'full' (10 params) or 'linear' (2 params)")
-    p.add_argument("--freeze-special", default="none", choices=["none", "eos", "plus_eos", "plus_eos_equals", "all"],
-                   help="Freeze special positions to zero: 'eos' saves 4p, 'plus_eos' saves 8p, 'all' saves 12p")
-    p.add_argument("--freeze-z-hi", action="store_true", default=False,
-                   help="Freeze z_hi carry position to zero (saves pos_dim params)")
-    p.add_argument("--freeze-spiral", type=str, default="",
-                   help="Comma-sep spiral params to freeze as buffers: amp,phase,slope,offset")
-    p.add_argument("--freeze-tok-arc", type=str, default="",
-                   help="Comma-sep tok_arc params to freeze as buffers: A,B,start,stride")
-    p.add_argument("--tie-tok-arc-ab", action="store_true", default=False,
-                   help="Tie tok_arc_A = tok_arc_B (circular arc, saves 1p)")
-    p.add_argument("--alibi", action="store_true", default=False,
-                   help="Add ALiBi attention bias with learned per-head slopes")
-    p.add_argument("--qk-source", default="pos", choices=["pos", "tok"],
-                   help="Q,K input: 'pos' (position subspace) or 'tok' (token subspace)")
+    p.add_argument(
+        "--pos-mode", default="learned", choices=["learned", "spiral_correct", "zero"]
+    )
+    p.add_argument(
+        "--pos-correction-mode",
+        default="full",
+        choices=["full", "linear", "none"],
+        help="Position correction: 'full' (10 params) or 'linear' (2 params)",
+    )
+    p.add_argument(
+        "--freeze-special",
+        default="none",
+        choices=["none", "eos", "plus_eos", "plus_eos_equals", "all"],
+        help="Freeze special positions to zero: 'eos' saves 4p, 'plus_eos' saves 8p, 'all' saves 12p",
+    )
+    p.add_argument(
+        "--freeze-z-hi",
+        action="store_true",
+        default=False,
+        help="Freeze z_hi carry position to zero (saves pos_dim params)",
+    )
+    p.add_argument(
+        "--freeze-spiral",
+        type=str,
+        default="",
+        help="Comma-sep spiral params to freeze as buffers: amp,phase,slope,offset",
+    )
+    p.add_argument(
+        "--spiral-init-amp",
+        type=float,
+        default=1.0,
+        help="Init/frozen value for spiral amp (default 1.0)",
+    )
+    p.add_argument(
+        "--spiral-init-phase",
+        type=float,
+        default=0.0,
+        help="Init/frozen value for spiral phase (default 0.0)",
+    )
+    p.add_argument(
+        "--spiral-init-slope",
+        type=float,
+        default=-1.0,
+        help="Init/frozen value for spiral slope (-1 = default 1/(MAX_DIGITS-1))",
+    )
+    p.add_argument(
+        "--spiral-init-offset",
+        type=float,
+        default=0.0,
+        help="Init/frozen value for spiral offset (default 0.0)",
+    )
+    p.add_argument(
+        "--freeze-tok-arc",
+        type=str,
+        default="",
+        help="Comma-sep tok_arc params to freeze as buffers: A,B,start,stride",
+    )
+    p.add_argument(
+        "--tie-tok-arc-ab",
+        action="store_true",
+        default=False,
+        help="Tie tok_arc_A = tok_arc_B (circular arc, saves 1p)",
+    )
+    p.add_argument(
+        "--alibi",
+        action="store_true",
+        default=False,
+        help="Add ALiBi attention bias with learned per-head slopes",
+    )
+    p.add_argument(
+        "--qk-source",
+        default="pos",
+        choices=["pos", "tok"],
+        help="Q,K input: 'pos' (position subspace) or 'tok' (token subspace)",
+    )
     p.add_argument("--tie-qk", action="store_true", default=False)
-    p.add_argument("--tie-vo", action="store_true", default=False,
-                   help="Tie v_proj to head_proj (v_proj.weight = head_proj.weight.T, saves 10p at d5h1)")
+    p.add_argument(
+        "--tie-vo",
+        action="store_true",
+        default=False,
+        help="Tie v_proj to head_proj (v_proj.weight = head_proj.weight.T, saves 10p at d5h1)",
+    )
     p.add_argument("--attn-out-rank", type=int, default=0)
-    p.add_argument("--num-kv-heads", type=int, default=0,
-                   help="Number of KV heads for GQA (0 = same as n_heads = standard MHA)")
-    p.add_argument("--q-phase", action="store_true", default=False,
-                   help="Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)")
-    p.add_argument("--q-proj-rank", type=int, default=0,
-                   help="Low-rank factorization of q_proj (0=full rank)")
-    p.add_argument("--q-proj-mode", type=str, default="full", choices=["full", "toeplitz"],
-                   help="Q projection structure: full (in*out params) or toeplitz (in+out-1 params)")
+    p.add_argument(
+        "--num-kv-heads",
+        type=int,
+        default=0,
+        help="Number of KV heads for GQA (0 = same as n_heads = standard MHA)",
+    )
+    p.add_argument(
+        "--q-phase",
+        action="store_true",
+        default=False,
+        help="Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)",
+    )
+    p.add_argument(
+        "--qk-dim",
+        type=int,
+        default=0,
+        help="Separate Q/K attention dim from head_dim (0=use head_dim). "
+        "Saves (head_dim-qk_dim)*pos_dim params from q_proj.",
+    )
+    p.add_argument(
+        "--q-proj-rank",
+        type=int,
+        default=0,
+        help="Low-rank factorization of q_proj (0=full rank)",
+    )
+    p.add_argument(
+        "--q-proj-mode",
+        type=str,
+        default="full",
+        choices=["full", "toeplitz"],
+        help="Q projection structure: full (in*out params) or toeplitz (in+out-1 params)",
+    )
     p.add_argument("--share-layers", action="store_true", default=False)
-    p.add_argument("--norm-mode", default="full", choices=["full", "shared", "scalar", "fixed", "no_ln2"],
-                   help="RMSNorm mode: full (18p), shared (6p), scalar (1p), fixed (0p), no_ln2 (12p)")
-    p.add_argument("--freeze-pad", action="store_true", default=False,
-                   help="Freeze PAD token embedding to zero (saves tok_dim params)")
-    p.add_argument("--softmax1", action="store_true", default=False,
-                   help="Use softmax1 (add 1 to denominator, allows attention sum < 1)")
-    p.add_argument("--attn-mode", default="split", choices=["split", "offset", "hard_offset"],
-                   help="Attention mode: 'split' (Q/K from pos, 26p), 'offset' (learnable bias, ~10p), 'hard_offset' (fixed, 0p)")
+    p.add_argument(
+        "--norm-mode",
+        default="full",
+        choices=["full", "shared", "scalar", "fixed", "no_ln2"],
+        help="RMSNorm mode: full (18p), shared (6p), scalar (1p), fixed (0p), no_ln2 (12p)",
+    )
+    p.add_argument(
+        "--freeze-pad",
+        action="store_true",
+        default=False,
+        help="Freeze PAD token embedding to zero (saves tok_dim params)",
+    )
+    p.add_argument(
+        "--softmax1",
+        action="store_true",
+        default=False,
+        help="Use softmax1 (add 1 to denominator, allows attention sum < 1)",
+    )
+    p.add_argument(
+        "--attn-mode",
+        default="split",
+        choices=["split", "offset", "hard_offset"],
+        help="Attention mode: 'split' (Q/K from pos, 26p), 'offset' (learnable bias, ~10p), 'hard_offset' (fixed, 0p)",
+    )
+    p.add_argument(
+        "--v-section-mode",
+        default="none",
+        choices=["none", "fixed_sign", "learned"],
+        help="Value-path operand role signal: none, fixed_sign (X:+1, Y:-1), or learned gains",
+    )
+    p.add_argument(
+        "--v-gain-x-init",
+        type=float,
+        default=1.0,
+        help="Initial X-section value gain when --v-section-mode=learned",
+    )
+    p.add_argument(
+        "--v-gain-y-init",
+        type=float,
+        default=-1.0,
+        help="Initial Y-section value gain when --v-section-mode=learned",
+    )
     p.add_argument("--token-init", default="spiral", choices=["spiral", "normal"])
-    p.add_argument("--tok-emb-mode", default="learned", choices=["learned", "parametric"],
-                   help="Token embedding mode: 'learned' (vocab_size x tok_dim params) or 'parametric' (4 arc params)")
-    p.add_argument("--vocab-size", type=int, default=14, choices=[10, 12, 14],
-                   help="Vocabulary size: 14 (default), 12 (merge PLUS/EQUALS), 10 (all specials → digit-0)")
+    p.add_argument(
+        "--tok-emb-mode",
+        default="learned",
+        choices=["learned", "parametric"],
+        help="Token embedding mode: 'learned' (vocab_size x tok_dim params) or 'parametric' (4 arc params)",
+    )
+    p.add_argument(
+        "--vocab-size",
+        type=int,
+        default=14,
+        choices=[10, 12, 14],
+        help="Vocabulary size: 14 (default), 12 (merge PLUS/EQUALS), 10 (all specials → digit-0)",
+    )
 
     # Task
-    p.add_argument("--task", default="addition", choices=["addition", "subtraction"],
-                   help="Task: 'addition' (a+b) or 'subtraction' (a-b, a>=b)")
+    p.add_argument(
+        "--task",
+        default="addition",
+        choices=["addition", "subtraction"],
+        help="Task: 'addition' (a+b) or 'subtraction' (a-b, a>=b)",
+    )
 
     # Training
     p.add_argument("--steps", type=int, default=500_000)
@@ -1039,61 +1414,178 @@ def parse_args():
     p.add_argument("--min-lr-ratio", type=float, default=0.1)
     p.add_argument("--warmup-steps", type=int, default=1000)
     p.add_argument("--weight-decay", type=float, default=0.01)
-    p.add_argument("--wd-adaptive", action="store_true", default=False,
-                   help="Enable adaptive weight decay (drop WD when grokking detected)")
-    p.add_argument("--wd-drop-exact", type=float, default=0.02,
-                   help="Val exact match threshold for first WD drop (stage 1)")
-    p.add_argument("--wd-drop-exact-final", type=float, default=0.20,
-                   help="Val exact match threshold for second WD drop (stage 2)")
-    p.add_argument("--wd-drop-tok-acc", type=float, default=0.70,
-                   help="Token accuracy gate: WD drop only fires if tok_acc also above this")
-    p.add_argument("--wd-drop-factor", type=float, default=0.1,
-                   help="WD multiplier per stage (stage1=factor, stage2=factor²)")
-    p.add_argument("--wd-mode", default="adaptive", choices=["adaptive", "scheduled", "cyclical", "warmup"],
-                   help="Weight decay mode: adaptive (metric-triggered), scheduled (fixed steps), "
-                        "cyclical (cosine oscillation), warmup (ramp then adaptive)")
-    p.add_argument("--wd-sched-step1", type=int, default=30_000,
-                   help="Step for first WD drop in scheduled mode")
-    p.add_argument("--wd-sched-step2", type=int, default=80_000,
-                   help="Step for second WD drop in scheduled mode")
-    p.add_argument("--wd-cycle-period", type=int, default=50_000,
-                   help="Period for cyclical WD cosine oscillation")
-    p.add_argument("--wd-warmup-steps", type=int, default=10_000,
-                   help="Steps with WD=0 before ramping (warmup mode)")
-    p.add_argument("--wd-ramp-steps", type=int, default=10_000,
-                   help="Steps to linearly ramp WD from 0 to base (warmup mode)")
-    p.add_argument("--wd-smooth", action="store_true", default=False,
-                   help="Smooth exponential WD decay after grokking onset (ratcheted)")
-    p.add_argument("--wd-smooth-alpha", type=float, default=0.0001,
-                   help="Exponential decay rate for smooth WD (reaches 0.1x at ~23K steps)")
+    p.add_argument(
+        "--wd-adaptive",
+        action="store_true",
+        default=False,
+        help="Enable adaptive weight decay (drop WD when grokking detected)",
+    )
+    p.add_argument(
+        "--wd-drop-exact",
+        type=float,
+        default=0.02,
+        help="Val exact match threshold for first WD drop (stage 1)",
+    )
+    p.add_argument(
+        "--wd-drop-exact-final",
+        type=float,
+        default=0.20,
+        help="Val exact match threshold for second WD drop (stage 2)",
+    )
+    p.add_argument(
+        "--wd-drop-tok-acc",
+        type=float,
+        default=0.70,
+        help="Token accuracy gate: WD drop only fires if tok_acc also above this",
+    )
+    p.add_argument(
+        "--wd-drop-factor",
+        type=float,
+        default=0.1,
+        help="WD multiplier per stage (stage1=factor, stage2=factor²)",
+    )
+    p.add_argument(
+        "--wd-mode",
+        default="adaptive",
+        choices=["adaptive", "scheduled", "cyclical", "warmup"],
+        help="Weight decay mode: adaptive (metric-triggered), scheduled (fixed steps), "
+        "cyclical (cosine oscillation), warmup (ramp then adaptive)",
+    )
+    p.add_argument(
+        "--wd-sched-step1",
+        type=int,
+        default=30_000,
+        help="Step for first WD drop in scheduled mode",
+    )
+    p.add_argument(
+        "--wd-sched-step2",
+        type=int,
+        default=80_000,
+        help="Step for second WD drop in scheduled mode",
+    )
+    p.add_argument(
+        "--wd-cycle-period",
+        type=int,
+        default=50_000,
+        help="Period for cyclical WD cosine oscillation",
+    )
+    p.add_argument(
+        "--wd-warmup-steps",
+        type=int,
+        default=10_000,
+        help="Steps with WD=0 before ramping (warmup mode)",
+    )
+    p.add_argument(
+        "--wd-ramp-steps",
+        type=int,
+        default=10_000,
+        help="Steps to linearly ramp WD from 0 to base (warmup mode)",
+    )
+    p.add_argument(
+        "--wd-smooth",
+        action="store_true",
+        default=False,
+        help="Smooth exponential WD decay after grokking onset (ratcheted)",
+    )
+    p.add_argument(
+        "--wd-smooth-alpha",
+        type=float,
+        default=0.0001,
+        help="Exponential decay rate for smooth WD (reaches 0.1x at ~23K steps)",
+    )
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--grokfast", action="store_true", default=False,
-                   help="Enable Grokfast EMA gradient filter (amplify slow gradient components)")
-    p.add_argument("--grokfast-alpha", type=float, default=0.98,
-                   help="Grokfast EMA decay rate (higher = longer memory)")
-    p.add_argument("--grokfast-lamb", type=float, default=2.0,
-                   help="Grokfast amplification factor for slow gradient components")
-    p.add_argument("--ar-loss", action="store_true", default=False,
-                   help="Use autoregressive training loss (feed own predictions, not teacher forcing)")
-    p.add_argument("--sam", action="store_true", default=False,
-                   help="Enable SAM (Sharpness-Aware Minimization) — 2x forward-backward per step")
-    p.add_argument("--sam-rho", type=float, default=0.05,
-                   help="SAM perturbation radius")
+    p.add_argument(
+        "--grokfast",
+        action="store_true",
+        default=False,
+        help="Enable Grokfast EMA gradient filter (amplify slow gradient components)",
+    )
+    p.add_argument(
+        "--grokfast-alpha",
+        type=float,
+        default=0.98,
+        help="Grokfast EMA decay rate (higher = longer memory)",
+    )
+    p.add_argument(
+        "--grokfast-lamb",
+        type=float,
+        default=2.0,
+        help="Grokfast amplification factor for slow gradient components",
+    )
+    p.add_argument(
+        "--ar-loss",
+        action="store_true",
+        default=False,
+        help="Use autoregressive training loss (feed own predictions, not teacher forcing)",
+    )
+    p.add_argument(
+        "--sam",
+        action="store_true",
+        default=False,
+        help="Enable SAM (Sharpness-Aware Minimization) — 2x forward-backward per step",
+    )
+    p.add_argument(
+        "--sam-rho", type=float, default=0.05, help="SAM perturbation radius"
+    )
 
     # Curriculum
     p.add_argument("--curriculum", default="1-3:2000,1-6:5000,1-10:rest")
-    p.add_argument("--carry-mix", type=float, default=0.0,
-                   help="Fraction of carry-focused examples (0-1)")
-    p.add_argument("--carry-mix-tok-acc-fade", type=float, default=0.7,
-                   help="Token accuracy where carry_mix starts fading to 0")
-    p.add_argument("--carry-mix-tok-acc-zero", type=float, default=0.9,
-                   help="Token accuracy where carry_mix reaches 0")
-    p.add_argument("--carry-mix-max-steps", type=int, default=100_000,
-                   help="Hard step cutoff: carry_mix=0 after this many steps")
-    p.add_argument("--carry-mix-fade-start", type=int, default=-1,
-                   help="Step-based fade: carry_mix starts fading at this step (-1 = use metric-based)")
-    p.add_argument("--carry-mix-fade-end", type=int, default=80_000,
-                   help="Step-based fade: carry_mix reaches 0 at this step")
+    p.add_argument(
+        "--carry-mix",
+        type=float,
+        default=0.0,
+        help="Fraction of carry-focused examples (0-1)",
+    )
+    p.add_argument(
+        "--carry-mix-tok-acc-fade",
+        type=float,
+        default=0.7,
+        help="Token accuracy where carry_mix starts fading to 0",
+    )
+    p.add_argument(
+        "--carry-mix-tok-acc-zero",
+        type=float,
+        default=0.9,
+        help="Token accuracy where carry_mix reaches 0",
+    )
+    p.add_argument(
+        "--carry-mix-max-steps",
+        type=int,
+        default=100_000,
+        help="Hard step cutoff: carry_mix=0 after this many steps",
+    )
+    p.add_argument(
+        "--carry-mix-fade-start",
+        type=int,
+        default=-1,
+        help="Step-based fade: carry_mix starts fading at this step (-1 = use metric-based)",
+    )
+    p.add_argument(
+        "--carry-mix-fade-end",
+        type=int,
+        default=80_000,
+        help="Step-based fade: carry_mix reaches 0 at this step",
+    )
+
+    # Borrow-mix (subtraction analog of carry-mix)
+    p.add_argument(
+        "--borrow-mix",
+        type=float,
+        default=0.0,
+        help="Fraction of borrow-focused examples for subtraction (0-1)",
+    )
+    p.add_argument(
+        "--borrow-mix-fade-start",
+        type=int,
+        default=-1,
+        help="Step where borrow_mix starts fading (-1 = no fade)",
+    )
+    p.add_argument(
+        "--borrow-mix-fade-end",
+        type=int,
+        default=80_000,
+        help="Step where borrow_mix reaches 0",
+    )
 
     # Evaluation
     p.add_argument("--eval-interval", type=int, default=3000)
@@ -1104,43 +1596,100 @@ def parse_args():
     p.add_argument("--jiggle-interval", type=int, default=50_000)
     p.add_argument("--jiggle-candidates", type=int, default=3)
     p.add_argument("--jiggle-settle-steps", type=int, default=10_000)
-    p.add_argument("--jiggle-strength", type=float, default=1.0,
-                   help="sigma = jiggle_strength * current_lr")
+    p.add_argument(
+        "--jiggle-strength",
+        type=float,
+        default=1.0,
+        help="sigma = jiggle_strength * current_lr",
+    )
     p.add_argument("--jiggle-fraction", type=float, default=0.5)
     p.add_argument("--jiggle-scope", default="ffn", choices=["all", "attn", "ffn"])
 
     # Scaffold weights
-    p.add_argument("--scaffold", type=str, default="",
-                   help="Comma-sep scaffold components: out_proj_rank,ffn_dim")
-    p.add_argument("--scaffold-anneal-start", type=int, default=20_000,
-                   help="Step to start ramping L1 penalty on scaffold")
-    p.add_argument("--scaffold-anneal-end", type=int, default=80_000,
-                   help="Step when L1 penalty reaches max and hard prune occurs")
-    p.add_argument("--scaffold-lambda", type=float, default=0.01,
-                   help="Max L1 penalty coefficient for scaffold weights")
-    p.add_argument("--scaffold-out-rank", type=int, default=2,
-                   help="Wide out_proj rank during scaffold training")
-    p.add_argument("--scaffold-ffn-dim", type=int, default=3,
-                   help="Wide FFN hidden dim during scaffold training")
-    p.add_argument("--scaffold-schedule", default="linear", choices=["linear", "quadratic"],
-                   help="Scaffold L1 penalty ramp schedule")
-    p.add_argument("--scaffold-prune-threshold", type=float, default=0.0,
-                   help="Only hard-prune when scaffold L1 drops below this value (0=prune at anneal_end regardless)")
-    p.add_argument("--scaffold-warmup-steps", type=int, default=0,
-                   help="LR warmup steps after scaffold prune (0=no warmup)")
-    p.add_argument("--scaffold-freeze", type=str, default="",
-                   help="Comma-sep params to freeze at grok trigger (e.g., 'z_hi_pos,special_pos_equals'). "
-                        "No L1, no widening — just freeze-in-place. Replaces warm-start cascade.")
-    p.add_argument("--scaffold-freeze-exact", type=float, default=0.99,
-                   help="Val exact match threshold to trigger scaffold freeze (default 0.99)")
-    p.add_argument("--scaffold-freeze-hold", type=int, default=0,
-                   help="Steps to hold above freeze-exact before triggering freeze (default 0 = immediate)")
+    p.add_argument(
+        "--scaffold",
+        type=str,
+        default="",
+        help="Comma-sep scaffold components: out_proj_rank,ffn_dim",
+    )
+    p.add_argument(
+        "--scaffold-anneal-start",
+        type=int,
+        default=20_000,
+        help="Step to start ramping L1 penalty on scaffold",
+    )
+    p.add_argument(
+        "--scaffold-anneal-end",
+        type=int,
+        default=80_000,
+        help="Step when L1 penalty reaches max and hard prune occurs",
+    )
+    p.add_argument(
+        "--scaffold-lambda",
+        type=float,
+        default=0.01,
+        help="Max L1 penalty coefficient for scaffold weights",
+    )
+    p.add_argument(
+        "--scaffold-out-rank",
+        type=int,
+        default=2,
+        help="Wide out_proj rank during scaffold training",
+    )
+    p.add_argument(
+        "--scaffold-ffn-dim",
+        type=int,
+        default=3,
+        help="Wide FFN hidden dim during scaffold training",
+    )
+    p.add_argument(
+        "--scaffold-schedule",
+        default="linear",
+        choices=["linear", "quadratic"],
+        help="Scaffold L1 penalty ramp schedule",
+    )
+    p.add_argument(
+        "--scaffold-prune-threshold",
+        type=float,
+        default=0.0,
+        help="Only hard-prune when scaffold L1 drops below this value (0=prune at anneal_end regardless)",
+    )
+    p.add_argument(
+        "--scaffold-warmup-steps",
+        type=int,
+        default=0,
+        help="LR warmup steps after scaffold prune (0=no warmup)",
+    )
+    p.add_argument(
+        "--scaffold-freeze",
+        type=str,
+        default="",
+        help="Comma-sep params to freeze at grok trigger (e.g., 'z_hi_pos,special_pos_equals'). "
+        "No L1, no widening — just freeze-in-place. Replaces warm-start cascade.",
+    )
+    p.add_argument(
+        "--scaffold-freeze-exact",
+        type=float,
+        default=0.99,
+        help="Val exact match threshold to trigger scaffold freeze (default 0.99)",
+    )
+    p.add_argument(
+        "--scaffold-freeze-hold",
+        type=int,
+        default=0,
+        help="Steps to hold above freeze-exact before triggering freeze (default 0 = immediate)",
+    )
 
     # Resume
-    p.add_argument("--resume", type=str, default=None,
-                   help="Path to checkpoint to resume from")
-    p.add_argument("--warm-start", type=str, default=None,
-                   help="Path to checkpoint for warm-starting (loads compatible weights only, no optimizer)")
+    p.add_argument(
+        "--resume", type=str, default=None, help="Path to checkpoint to resume from"
+    )
+    p.add_argument(
+        "--warm-start",
+        type=str,
+        default=None,
+        help="Path to checkpoint for warm-starting (loads compatible weights only, no optimizer)",
+    )
 
     return p.parse_args()
 
@@ -1171,6 +1720,10 @@ def main():
         freeze_special=args.freeze_special,
         freeze_z_hi=args.freeze_z_hi,
         freeze_spiral=args.freeze_spiral,
+        spiral_init_amp=args.spiral_init_amp,
+        spiral_init_phase=args.spiral_init_phase,
+        spiral_init_slope=args.spiral_init_slope,
+        spiral_init_offset=args.spiral_init_offset,
         freeze_tok_arc=args.freeze_tok_arc,
         tie_tok_arc_ab=args.tie_tok_arc_ab,
         alibi=args.alibi,
@@ -1180,12 +1733,16 @@ def main():
         attn_out_rank=args.attn_out_rank,
         num_kv_heads=args.num_kv_heads,
         q_phase=args.q_phase,
+        qk_dim=args.qk_dim,
         q_proj_rank=args.q_proj_rank,
         q_proj_mode=args.q_proj_mode,
         share_layers=args.share_layers,
         norm_mode=args.norm_mode,
         freeze_pad=args.freeze_pad,
         softmax1=args.softmax1,
+        v_section_mode=args.v_section_mode,
+        v_gain_x_init=args.v_gain_x_init,
+        v_gain_y_init=args.v_gain_y_init,
         token_init=args.token_init,
         tok_emb_mode=args.tok_emb_mode,
         vocab_size=args.vocab_size,
@@ -1206,33 +1763,56 @@ def main():
     n_params = count_parameters(model)
     inner_dim = cfg.n_heads * cfg.head_dim
     if target_cfg:
-        print(f"Model: {n_params} parameters (scaffold — target: {count_parameters(MicroAdder(target_cfg))}p)")
+        print(
+            f"Model: {n_params} parameters (scaffold — target: {count_parameters(MicroAdder(target_cfg))}p)"
+        )
         print(f"  Scaffold components: {', '.join(sorted(scaffold_components))}")
-        print(f"  Anneal: steps {args.scaffold_anneal_start}-{args.scaffold_anneal_end}, "
-              f"lambda={args.scaffold_lambda}, schedule={args.scaffold_schedule}")
+        print(
+            f"  Anneal: steps {args.scaffold_anneal_start}-{args.scaffold_anneal_end}, "
+            f"lambda={args.scaffold_lambda}, schedule={args.scaffold_schedule}"
+        )
     elif args.scaffold_freeze:
-        freeze_params = [p.strip() for p in args.scaffold_freeze.split(",") if p.strip()]
-        freeze_count = sum(p.numel() for n, p in model.named_parameters() if n in freeze_params)
-        print(f"Model: {n_params} parameters (freeze-scaffold — target: {n_params - freeze_count}p after freeze)")
+        freeze_params = [
+            p.strip() for p in args.scaffold_freeze.split(",") if p.strip()
+        ]
+        freeze_count = sum(
+            p.numel() for n, p in model.named_parameters() if n in freeze_params
+        )
+        print(
+            f"Model: {n_params} parameters (freeze-scaffold — target: {n_params - freeze_count}p after freeze)"
+        )
         print(f"  Freeze params: {', '.join(freeze_params)} ({freeze_count} values)")
-        print(f"  Freeze trigger: val_exact >= {args.scaffold_freeze_exact}"
-              + (f", hold {args.scaffold_freeze_hold} steps" if args.scaffold_freeze_hold > 0 else ""))
+        print(
+            f"  Freeze trigger: val_exact >= {args.scaffold_freeze_exact}"
+            + (
+                f", hold {args.scaffold_freeze_hold} steps"
+                if args.scaffold_freeze_hold > 0
+                else ""
+            )
+        )
     else:
         print(f"Model: {n_params} parameters")
     if inner_dim != cfg.d_model:
-        print(f"  ** Decoupled: d_model={cfg.d_model}, inner_dim={inner_dim} "
-              f"(n_heads={cfg.n_heads} x head_dim={cfg.head_dim})")
+        print(
+            f"  ** Decoupled: d_model={cfg.d_model}, inner_dim={inner_dim} "
+            f"(n_heads={cfg.n_heads} x head_dim={cfg.head_dim})"
+        )
     for name, count in parameter_breakdown(model).items():
         print(f"  {name}: {count}")
 
     if args.sam:
         optimizer = SAM(
-            model.parameters(), torch.optim.AdamW,
-            rho=args.sam_rho, lr=args.lr, weight_decay=args.weight_decay,
+            model.parameters(),
+            torch.optim.AdamW,
+            rho=args.sam_rho,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
         )
     else:
         optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
         )
 
     # Resume
@@ -1255,42 +1835,69 @@ def main():
             else:
                 skipped += 1
         model.load_state_dict(tgt_sd, strict=False)
-        print(f"Warm-started from {args.warm_start}: loaded {loaded}, skipped {skipped} keys")
+        print(
+            f"Warm-started from {args.warm_start}: loaded {loaded}, skipped {skipped} keys"
+        )
 
     # Curriculum
     curriculum = parse_curriculum(args.curriculum)
     print(f"Curriculum: {curriculum}")
     if args.carry_mix > 0:
         print(f"Carry-focused mix: {args.carry_mix:.0%}")
+    if args.borrow_mix > 0:
+        print(
+            f"Borrow-focused mix: {args.borrow_mix:.0%}, fade [{args.borrow_mix_fade_start}, "
+            f"{args.borrow_mix_fade_end}]"
+        )
     if args.ar_loss:
         print("Training loss: AUTOREGRESSIVE (feed own predictions)")
     if args.sam:
         print(f"SAM: rho={args.sam_rho} (2x forward-backward per step)")
     if args.wd_mode == "scheduled":
-        print(f"WD mode: scheduled (drop at step {args.wd_sched_step1}/{args.wd_sched_step2}, "
-              f"factor={args.wd_drop_factor})")
+        print(
+            f"WD mode: scheduled (drop at step {args.wd_sched_step1}/{args.wd_sched_step2}, "
+            f"factor={args.wd_drop_factor})"
+        )
     elif args.wd_mode == "cyclical":
-        print(f"WD mode: cyclical (period={args.wd_cycle_period}, "
-              f"range=[{args.weight_decay * args.wd_drop_factor**2:.2e}, {args.weight_decay:.2e}])")
+        print(
+            f"WD mode: cyclical (period={args.wd_cycle_period}, "
+            f"range=[{args.weight_decay * args.wd_drop_factor**2:.2e}, {args.weight_decay:.2e}])"
+        )
     elif args.wd_mode == "warmup":
-        print(f"WD mode: warmup (zero for {args.wd_warmup_steps} steps, "
-              f"ramp over {args.wd_ramp_steps} steps, then adaptive)")
+        print(
+            f"WD mode: warmup (zero for {args.wd_warmup_steps} steps, "
+            f"ramp over {args.wd_ramp_steps} steps, then adaptive)"
+        )
     elif args.wd_smooth:
-        print(f"Smooth WD: exponential decay (alpha={args.wd_smooth_alpha}) after "
-              f"val_exact>{args.wd_drop_exact} & tok_acc>{args.wd_drop_tok_acc}, "
-              f"floor={args.weight_decay * args.wd_drop_factor**2:.2e}")
+        print(
+            f"Smooth WD: exponential decay (alpha={args.wd_smooth_alpha}) after "
+            f"val_exact>{args.wd_drop_exact} & tok_acc>{args.wd_drop_tok_acc}, "
+            f"floor={args.weight_decay * args.wd_drop_factor**2:.2e}"
+        )
     elif args.wd_adaptive:
-        print(f"Adaptive WD: drop {args.wd_drop_factor}x at val_exact>{args.wd_drop_exact}, "
-              f"{args.wd_drop_factor}²x at val_exact>{args.wd_drop_exact_final}, "
-              f"tok_acc gate>{args.wd_drop_tok_acc}")
+        print(
+            f"Adaptive WD: drop {args.wd_drop_factor}x at val_exact>{args.wd_drop_exact}, "
+            f"{args.wd_drop_factor}²x at val_exact>{args.wd_drop_exact_final}, "
+            f"tok_acc gate>{args.wd_drop_tok_acc}"
+        )
     if args.grokfast:
         print(f"Grokfast: EMA alpha={args.grokfast_alpha}, lambda={args.grokfast_lamb}")
     if args.jiggle:
-        print(f"Jiggle: every {args.jiggle_interval} steps, "
-              f"{args.jiggle_candidates} candidates, "
-              f"{args.jiggle_settle_steps} settle steps, "
-              f"strength={args.jiggle_strength}, "
-              f"fraction={args.jiggle_fraction}, scope={args.jiggle_scope}")
+        print(
+            f"Jiggle: every {args.jiggle_interval} steps, "
+            f"{args.jiggle_candidates} candidates, "
+            f"{args.jiggle_settle_steps} settle steps, "
+            f"strength={args.jiggle_strength}, "
+            f"fraction={args.jiggle_fraction}, scope={args.jiggle_scope}"
+        )
+    if args.v_section_mode != "none":
+        if args.v_section_mode == "learned":
+            print(
+                f"Value section gains: learned (X init={args.v_gain_x_init}, "
+                f"Y init={args.v_gain_y_init})"
+            )
+        else:
+            print("Value section gains: fixed_sign (X:+1, Y:-1)")
 
     # Run directory (auto-append seed)
     args.run_name = f"{args.run_name}_s{args.seed}"

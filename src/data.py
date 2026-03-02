@@ -123,12 +123,16 @@ def sample_batch(
     rng: random.Random,
     device: torch.device,
     carry_mix: float = 0.0,
+    borrow_mix: float = 0.0,
     vocab_size: int = 14,
     task: str = "addition",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Sample a batch of addition or subtraction examples.
 
     Returns (input_ids, targets), both shape (batch_size, 33).
+
+    carry_mix: fraction of carry-focused examples (addition only).
+    borrow_mix: fraction of borrow-focused examples (subtraction only).
     """
     inputs, targets = [], []
     max_val = 10 ** max_digits - 1
@@ -136,8 +140,11 @@ def sample_batch(
 
     for _ in range(batch_size):
         if task == "subtraction":
-            a = rng.randint(min_val, max_val)
-            b = rng.randint(0, a)  # b <= a so result is non-negative
+            if borrow_mix > 0 and rng.random() < borrow_mix:
+                a, b = _sample_borrow_example(min_digits, max_digits, rng)
+            else:
+                a = rng.randint(min_val, max_val)
+                b = rng.randint(0, a)  # b <= a so result is non-negative
         elif carry_mix > 0 and rng.random() < carry_mix:
             a, b = _sample_carry_example(min_digits, max_digits, rng)
         else:
@@ -186,6 +193,58 @@ def _sample_carry_example(
 
     cap = 10 ** 10 - 1
     return max(0, min(a, cap)), max(0, min(b, cap))
+
+
+def _sample_borrow_example(
+    min_digits: int, max_digits: int, rng: random.Random
+) -> Tuple[int, int]:
+    """Generate borrow-focused subtraction example (a >= b guaranteed).
+
+    Analogous to _sample_carry_example but for subtraction borrows.
+    A borrow at digit i occurs when a_i < b_i (need to borrow from i+1).
+    """
+    nd = rng.randint(min_digits, max_digits)
+    pattern = rng.choice(["single", "chain", "place", "boundary"])
+
+    if pattern == "single":
+        # One position triggers a borrow: a_pos small, b_pos large
+        # Other positions: a large, b small → guarantees a > b overall
+        pos = rng.randint(0, nd - 1)
+        a = 0
+        b = 0
+        for p in range(nd):
+            if p == pos:
+                a += rng.randint(0, 4) * (10 ** p)
+                b += rng.randint(5, 9) * (10 ** p)
+            else:
+                a += rng.randint(5, 9) * (10 ** p)
+                b += rng.randint(0, 4) * (10 ** p)
+    elif pattern == "chain":
+        # Long borrow chain: 10^k - small → borrows cascade through zeros
+        # e.g., 10000 - 3 = 9997 (borrow propagates through 4 zeros)
+        chain_len = min(nd, MAX_DIGITS - 1)  # keep 10^k within 10 digits
+        a = 10 ** chain_len
+        b = rng.randint(1, 10 ** min(chain_len, 3))
+    elif pattern == "place":
+        # Random a minus single nonzero digit at one position
+        # If a has a 0 there, borrow will propagate
+        a = rng.randint(10 ** (nd - 1), 10 ** nd - 1)
+        pos = rng.randint(0, nd - 1)
+        b = rng.randint(1, 9) * (10 ** pos)
+    else:  # boundary
+        # Just above a power of 10 minus small → borrows past the boundary
+        # e.g., 10001 - 2 = 9999
+        power = rng.randint(min_digits, max_digits)
+        power = min(power, MAX_DIGITS - 1)
+        a = 10 ** power + rng.randint(0, 9)
+        b = rng.randint(1, 20)
+
+    cap = 10 ** 10 - 1
+    a = max(0, min(a, cap))
+    b = max(0, min(b, cap))
+    if b > a:
+        a, b = b, a  # swap to ensure a >= b
+    return a, b
 
 
 # ── Curriculum ─────────────────────────────────────────────────────────────

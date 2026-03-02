@@ -1,17 +1,19 @@
-"""MicroAdder: 74-parameter transformer for 10-digit addition.
+"""MicroAdder: minimal transformer for 10-digit addition.
 
 Architecture:
     d_model = 5 = tok_dim(2) + pos_dim(3)
-    1 layer, 1 head, head_dim = 5 (= d_model)
-    Split attention: Q,K from pos_dim (3->5), V from tok_dim via tied head_proj
+    1 layer, 1 head
+    Split attention: Q,K from pos_dim, V from tok_dim via tied head_proj
     Rank-1 attention output projection
     FFN dim=2, GELU activation, no bias
     Shared RMSNorm (single weight vector for all 3 norm sites)
     Parametric circular token embeddings (3 arc params)
-    Spiral positional encoding (4 params)
+    Spiral or sinusoidal positional encoding
     vocab_size=10 (digits 0-9 only)
 
-Parameter count: exactly 74.
+Configurations:
+    74p: head_dim=5, qk_dim=5, learned spiral (4 params)
+    67p: head_dim=5, qk_dim=4, frozen sinusoidal positions (0 params)
 """
 
 import math
@@ -32,7 +34,7 @@ from .data import (
 
 @dataclass
 class ModelConfig:
-    """All architectural hyperparameters for the 74p MicroAdder."""
+    """All architectural hyperparameters for the MicroAdder."""
     d_model: int = 5
     tok_dim: int = 2
     pos_dim: int = 3
@@ -41,6 +43,22 @@ class ModelConfig:
     ffn_dim: int = 2
     vocab_size: int = VOCAB_SIZE
     max_seq_len: int = SEQ_LEN
+
+    # Q/K dimension: 0 = use head_dim. When >0, Q/K project to qk_dim
+    # instead of head_dim, decoupling attention routing from V/output.
+    qk_dim: int = 0
+
+    # Frozen sinusoidal positions: comma-separated params to freeze.
+    # e.g. "amp,phase,slope,offset" freezes all 4 spiral params (saves 4p).
+    freeze_spiral: str = ""
+    spiral_init_amp: float = 3.5
+    spiral_init_phase: float = 0.0
+    spiral_init_slope: float = 0.15
+    spiral_init_offset: float = 0.0
+
+    @property
+    def effective_qk_dim(self) -> int:
+        return self.qk_dim if self.qk_dim > 0 else self.head_dim
 
     def to_dict(self):
         return asdict(self)
@@ -87,22 +105,25 @@ class Rank1Linear(nn.Module):
 # ── Main Model ───────────────────────────────────────────────────────────
 
 class MicroAdder(nn.Module):
-    """74-parameter autoregressive decoder for 10-digit addition.
+    """Autoregressive decoder for 10-digit addition.
 
-    Parameter breakdown (74 total):
+    At 67p (qk_dim=4, frozen sinusoidal positions):
         tok_arc (A, start, stride)      3
-        spiral (amp, phase, slope, off) 4
         z_hi_pos                        3
         special_pos_equals              3
         q_phase_angle                   1
-        q_proj (3 -> 5, no bias)       15
+        q_proj (3 -> 4, no bias)       12
         out_proj (5+5 rank-1)          10
         fc1 (5 -> 2, no bias)          10
         fc2 (2 -> 5, no bias)          10
         head_proj (5 -> 2, no bias)    10
         norm_weight (shared, dim 5)     5
-        ────────────────────────────────
-        TOTAL                          74
+        TOTAL                          67
+
+    At 74p (qk_dim=5, learned spiral):
+        + spiral (amp, phase, slope, off) 4
+        + q_proj extra row                3
+        TOTAL                            74
     """
 
     def __init__(self, cfg: ModelConfig = None):
@@ -119,14 +140,23 @@ class MicroAdder(nn.Module):
         self.tok_arc_start = nn.Parameter(torch.tensor(-1.2))
         self.tok_arc_stride = nn.Parameter(torch.tensor(0.29))
 
-        # ── Spiral positional encoding (4 params) ────────────────────
+        # ── Spiral positional encoding (0 or 4 params) ───────────────
         # pos[i] = [amp*cos(2*pi*i/10 + phase),
         #           amp*sin(2*pi*i/10 + phase),
         #           slope*i + offset]
-        self.spiral_amp = nn.Parameter(torch.tensor(1.0))
-        self.spiral_phase = nn.Parameter(torch.tensor(0.0))
-        self.spiral_slope = nn.Parameter(torch.tensor(1.0 / 9.0))
-        self.spiral_offset = nn.Parameter(torch.tensor(0.0))
+        frozen_spiral = set(cfg.freeze_spiral.split(",")) if cfg.freeze_spiral else set()
+        spiral_params = {
+            "amp": cfg.spiral_init_amp,
+            "phase": cfg.spiral_init_phase,
+            "slope": cfg.spiral_init_slope,
+            "offset": cfg.spiral_init_offset,
+        }
+        for name, init_val in spiral_params.items():
+            t = torch.tensor(float(init_val))
+            if name in frozen_spiral:
+                self.register_buffer(f"spiral_{name}", t)
+            else:
+                setattr(self, f"spiral_{name}", nn.Parameter(t))
 
         # ── Special positions ────────────────────────────────────────
         # PLUS (frozen zero), EQUALS (learned, 3 params), EOS (frozen zero)
@@ -148,8 +178,9 @@ class MicroAdder(nn.Module):
         )
 
         # ── Attention (tied Q/K with phase rotation) ─────────────────
-        # Q and K share the same projection: pos_dim -> head_dim (3->5)
-        self.q_proj = nn.Linear(cfg.pos_dim, cfg.head_dim, bias=False)  # 15 params
+        # Q and K share the same projection: pos_dim -> qk_dim
+        qk_dim = cfg.effective_qk_dim
+        self.q_proj = nn.Linear(cfg.pos_dim, qk_dim, bias=False)
 
         # Learnable phase angle for Q (1 param) -- breaks Q/K symmetry
         self.q_phase_angle = nn.Parameter(torch.zeros(cfg.n_heads))  # 1 param
@@ -240,14 +271,14 @@ class MicroAdder(nn.Module):
     def _apply_q_phase(self, q: torch.Tensor) -> torch.Tensor:
         """Apply learnable 2D rotation to Q vectors.
 
-        Rotates pairs of dimensions: (0,1), (2,3). Dim 4 is untouched.
-        q shape: (B, n_heads, T, head_dim)
+        Rotates pairs of dimensions: (0,1), (2,3), etc. Odd trailing dim untouched.
+        q shape: (B, n_heads, T, qk_dim)
         """
+        qk_dim = self.cfg.effective_qk_dim
         cos_a = self.q_phase_angle.cos()  # (n_heads,)
         sin_a = self.q_phase_angle.sin()
         q_rot = q.clone()
-        # Rotate dim pairs (0,1) and (2,3); dim 4 left as-is
-        for p in range(self.cfg.head_dim // 2):
+        for p in range(qk_dim // 2):
             d0, d1 = 2 * p, 2 * p + 1
             c = cos_a[None, :, None]  # (1, n_heads, 1)
             s = sin_a[None, :, None]
@@ -284,6 +315,7 @@ class MicroAdder(nn.Module):
             (logits, loss) where loss is None if targets not provided
         """
         B, T = idx.shape
+        qk_dim = self.cfg.effective_qk_dim
         tok_emb_table = self._compute_tok_emb()                        # (10, 2)
 
         # 1. Token + position embeddings -> (B, T, 5)
@@ -298,23 +330,23 @@ class MicroAdder(nn.Module):
         pos_h = h[:, :, self.cfg.tok_dim:]                              # (B, T, 3)
         tok_h = h[:, :, :self.cfg.tok_dim]                              # (B, T, 2)
 
-        Q = self.q_proj(pos_h)                                          # (B, T, 5)
-        K = self.q_proj(pos_h)                                          # (B, T, 5) tied
+        Q = self.q_proj(pos_h)                                          # (B, T, qk_dim)
+        K = self.q_proj(pos_h)                                          # (B, T, qk_dim) tied
         # Tied V/O: V projection uses head_proj.weight as the (tok_dim->d_model) map.
         # head_proj.weight shape is (tok_dim, d_model) = (2, 5), so
         # V = tok_h @ weight = (B,T,2) @ (2,5) = (B,T,5).
         V = tok_h @ self.head_proj.weight                               # (B, T, 5)
 
         # Reshape for multi-head (trivial with 1 head)
-        Q = Q.view(B, T, self.cfg.n_heads, self.cfg.head_dim).transpose(1, 2)
-        K = K.view(B, T, self.cfg.n_heads, self.cfg.head_dim).transpose(1, 2)
+        Q = Q.view(B, T, self.cfg.n_heads, qk_dim).transpose(1, 2)
+        K = K.view(B, T, self.cfg.n_heads, qk_dim).transpose(1, 2)
         V = V.view(B, T, self.cfg.n_heads, self.cfg.head_dim).transpose(1, 2)
 
         # 4. Phase rotation on Q (asymmetry for tied Q/K)
         Q = self._apply_q_phase(Q)
 
         # 5. Scaled dot-product attention with causal mask
-        att = (Q @ K.transpose(-2, -1)) / math.sqrt(self.cfg.head_dim)
+        att = (Q @ K.transpose(-2, -1)) / math.sqrt(qk_dim)
         att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
 

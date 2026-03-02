@@ -1,4 +1,4 @@
-# 74 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition
+# 67 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition
 
 **Arseniy Zarechnev and Claude**
 
@@ -8,9 +8,9 @@ March 2026
 
 ## Abstract
 
-We train a 74-parameter autoregressive transformer that performs 10-digit addition with 100% accuracy (10,010/10,010 on the AdderBoard benchmark). The model is a single-layer decoder with a 5-dimensional residual stream, one attention head, and a 2-unit feedforward network. Every parameter is learned from random initialization — no warm-starting, no frozen pretrained values.
+We train a 67-parameter autoregressive transformer that performs 10-digit addition with 100% accuracy (10,010/10,010 on the AdderBoard benchmark). The model is a single-layer decoder with a 5-dimensional residual stream, one attention head with a 4-dimensional Q/K subspace, and a 2-unit feedforward network. Every parameter is learned from random initialization — no warm-starting, no frozen pretrained values. Positional encodings use a fixed sinusoidal scheme (0 learned parameters).
 
-Starting from a 242-parameter baseline, we achieve a 70% compression through nine architectural innovations: a single full-rank attention head, parametric circular token embeddings, tied Q/K projections with phase rotation, tied V/output weights, shared normalization, rank-1 attention output, and frozen delimiter positions. A training breakthrough — high carry-mix curriculum with step-based fade — improved the grokking rate from ~10% to 100% of random seeds, making the result reproducible.
+Starting from a 242-parameter baseline, we achieve a 72% compression through eleven architectural innovations: a single full-rank attention head, parametric circular token embeddings, tied Q/K projections with phase rotation, tied V/output weights, shared normalization, rank-1 attention output, frozen delimiter positions, reduced Q/K dimensionality, and sinusoidal positional encoding. A training breakthrough — high carry-mix curriculum with step-based fade — improved the grokking rate from ~10% to 100% of random seeds, making the result reproducible.
 
 The model is the smallest known trained transformer achieving perfect 10-digit addition.
 
@@ -20,7 +20,7 @@ The model is the smallest known trained transformer achieving perfect 10-digit a
 
 The [AdderBoard](https://github.com/anadim/AdderBoard) challenge asks: what is the smallest transformer that can learn 10-digit addition from scratch with 100% accuracy? The task is a clean testbed for understanding transformer expressivity, learnability, and the gap between what neural networks can represent versus what gradient descent can discover.
 
-Our starting point was JackCai's 242-parameter split-subspace architecture — a single-layer decoder with 6-dimensional embeddings, two attention heads, and a carry-lookahead mechanism. Over seven research sessions, we compressed this to 74 parameters while maintaining perfect accuracy, establishing the trained-from-scratch state of the art.
+Our starting point was JackCai's 242-parameter split-subspace architecture — a single-layer decoder with 6-dimensional embeddings, two attention heads, and a carry-lookahead mechanism. Over eight research sessions, we compressed this to 67 parameters while maintaining perfect accuracy, establishing the trained-from-scratch state of the art.
 
 The compression path was not planned in advance. At each step, structural diagnostics of the trained model revealed convergence patterns — weights approaching symmetry, dimensions going unused, norms converging — that suggested the next constraint to impose. Many of these constraints had been previously tested and failed at larger scales, only to succeed at smaller ones. The recurring lesson: you cannot plan a compression roadmap. You must re-test every assumption at each new scale.
 
@@ -36,7 +36,7 @@ Addition requires carry propagation: to predict digit Z_i, the model needs not j
 
 ## 2. Architecture
 
-The model is a single-layer autoregressive decoder with a 5-dimensional residual stream split into two subspaces: a 2D **token subspace** (carrying digit identity) and a 3D **position subspace** (carrying positional information). This split-subspace design, inherited from JackCai's architecture, allows the attention mechanism to route purely based on position while the value pathway carries token content.
+The model is a single-layer autoregressive decoder with a 5-dimensional residual stream split into two subspaces: a 2D **token subspace** (carrying digit identity) and a 3D **position subspace** (carrying positional information). This split-subspace design, inherited from JackCai's architecture, allows the attention mechanism to route purely based on position while the value pathway carries token content. The Q/K attention operates in a 4-dimensional subspace (decoupled from the 5D value pathway), and positional encoding is a fixed sinusoidal scheme requiring zero learned parameters.
 
 ### 2.1 Parametric Circular Token Embeddings (3 parameters)
 
@@ -46,35 +46,39 @@ Instead of learning a 10×2 embedding table (20 parameters), we parameterize all
 emb[d] = [A·cos(start + d·stride), A·sin(start + d·stride)]
 ```
 
-Three parameters (A, start, stride) define the entire embedding table. The trained model places digits 0-9 on a 62.5° arc of a circle with radius 12.99, uniformly spaced at ~6.9° per digit. This same embedding table serves double duty as the output classification layer — logits are computed as the dot product between the final hidden state and each embedding vector. The circular geometry provides roughly equal angular separation between all digit pairs, which is near-optimal for 10-class discrimination in 2D.
+Three parameters (A, start, stride) define the entire embedding table. The trained 67p model places digits 0-9 on a 71.5° arc of a circle with radius 6.06, uniformly spaced at ~7.9° per digit. This same embedding table serves double duty as the output classification layer — logits are computed as the dot product between the final hidden state and each embedding vector. The circular geometry provides roughly equal angular separation between all digit pairs, which is near-optimal for 10-class discrimination in 2D.
 
-Early in the compression journey, we used 4 parameters (separate A and B for an elliptical arc), but structural diagnostics showed the trained A/B ratio was 1.005 — the model wanted a circle. Tying A=B saved the final parameter from 75 to 74.
+Early in the compression journey, we used 4 parameters (separate A and B for an elliptical arc), but structural diagnostics showed the trained A/B ratio was 1.005 — the model wanted a circle. Tying A=B saved a parameter from 75 to 74.
 
-### 2.2 Spiral Positional Encoding (4 parameters)
+### 2.2 Sinusoidal Positional Encoding (0 parameters)
 
-The 10 digit positions (shared across the X, Y, and Z groups) are encoded as a parametric spiral:
+The 10 digit positions (shared across the X, Y, and Z groups) are encoded as a fixed sinusoidal spiral:
 
 ```
-pos[i] = [amp·cos(2πi/10 + phase), amp·sin(2πi/10 + phase), slope·i + offset]
+pos[i] = [3.5·cos(2πi/10), 3.5·sin(2πi/10), 0.15·i]
 ```
 
-The first two dimensions form a circle capturing the base-10 periodicity (digit 0 and digit 10 would overlap), while the third dimension provides a linear ramp distinguishing different positions along the sequence. The trained model learns amp=3.56, phase=-25.3°, slope=0.17, offset=-2.55 — a gently tilted ring in 3D.
+The first two dimensions form a circle at 36° intervals capturing the base-10 periodicity, while the third dimension provides a gentle linear ramp (0.15 per position) distinguishing different positions along the sequence. All four spiral parameters (amp=3.5, phase=0, slope=0.15, offset=0) are frozen at initialization — zero learned parameters. This is possible because the evenly-spaced sinusoidal positions provide sufficient structure for the Q/K projection to learn the correct attention routing.
+
+The earlier 74p model learned these parameters, converging to amp=3.56, phase=-25.3°, slope=0.17, offset=-2.55. The frozen sinusoidal values are close enough that the Q/K projection compensates for the difference.
 
 Three additional special positions are needed:
-- **Carry position** (z_hi_pos, 3 learned parameters): The carry-out position at Z_10, learned with norm 49.2 — deliberately placed far from all digit positions (norm ~4) to prevent confusion in the attention routing.
+- **Carry position** (z_hi_pos, 3 learned parameters): The carry-out position at Z_10, learned with norm 16.2 — placed far from all digit positions (norm ~3.5) to dominate attention routing for the carry-out digit.
 - **EQUALS position** (3 learned parameters): The delimiter between the Y operand and the answer.
 - **PLUS and EOS positions** (frozen at zero): These delimiters carry no useful positional information and are fixed at the origin.
 
-### 2.3 Tied Q/K with Phase Rotation (16 parameters)
+### 2.3 Tied Q/K with Phase Rotation and Reduced Dimension (13 parameters)
 
-The attention mechanism operates on the position subspace only (3D → 5D projection). A critical innovation: Q and K share the same projection matrix (15 parameters), and a single learnable angle (1 parameter) rotates Q relative to K:
+The attention mechanism operates on the position subspace only, projected to a 4-dimensional Q/K space (3D → 4D, 12 parameters). Q and K share the same projection matrix, and a single learnable angle (1 parameter) rotates Q relative to K:
 
 ```
 Q_rotated[..., 2p]   = Q[..., 2p]·cos(θ) - Q[..., 2p+1]·sin(θ)
 Q_rotated[..., 2p+1] = Q[..., 2p]·sin(θ) + Q[..., 2p+1]·cos(θ)
 ```
 
-This phase rotation (trained to θ = 41.3°) provides the asymmetry the carry circuit requires — without it, Q·K^T is symmetric and the model cannot distinguish "I attend to you" from "you attend to me." The idea was borrowed from the hand-coded param_40 model and saves 14 parameters compared to a separate K projection.
+This phase rotation (trained to θ = -29.4°) provides the asymmetry the carry circuit requires — without it, Q·K^T is symmetric and the model cannot distinguish "I attend to you" from "you attend to me." The idea was borrowed from the hand-coded param_40 model and saves 11 parameters compared to a separate K projection.
+
+The reduction from 5D to 4D Q/K space (saving 3 parameters) is possible because the 74p model's Q/K projection had a dead 5th row (all near-zero weights). Removing it formalizes what the model already learned: 4 dimensions suffice for position-based attention routing. The value pathway remains at full 5D (head_dim=5), decoupling attention routing from content aggregation.
 
 ### 2.4 Tied V/Output (0 extra parameters)
 
@@ -104,18 +108,21 @@ A minimal feedforward network: Linear(5→2, no bias) → GELU → Linear(2→5,
 Component                   Params   Role
 ─────────────────────────────────────────
 tok_arc (A, start, stride)     3     circular digit embedding
-spiral (amp, phase, slope, off) 4    digit position encoding
 z_hi_pos                       3     carry position
 special_pos_equals             3     EQUALS position
 q_phase_angle                  1     Q/K asymmetry
-q_proj                        15     position → attention (3→5)
+q_proj                        12     position → attention (3→4)
 out_proj (A + B)              10     rank-1 attention output
 fc1                           10     FFN first layer (5→2)
 fc2                           10     FFN second layer (2→5)
 head_proj                     10     output head / v_proj (5→2)
 norm_weight                    5     shared RMSNorm
 ─────────────────────────────────────────
-TOTAL                         74
+TOTAL                         67
+
+Free (frozen at initialization):
+spiral (amp, phase, slope, off) 4    sinusoidal positions
+PLUS/EOS positions              6    frozen at zero
 ```
 
 ---
@@ -153,11 +160,17 @@ This last point was critical. Our earlier approach used metric-triggered fade (r
 
 **Impact**: With carry_mix=0.8 and step-based fade, 3/3 random seeds grokked at 74p. With the old carry_mix=0.3 and metric-based fade, only ~1/10 seeds grokked at 75p. This transformed a fragile, seed-dependent process into a robust one.
 
+The 67p model uses a tighter fade window (15K-45K vs 10K-80K), matching its faster grokking dynamics.
+
 ### 3.4 Shorter Step Budget
 
-Counterintuitively, training for fewer steps (120K vs 400-500K) improves stability. With cosine learning rate decay over 120K steps, the LR drops to ~0.007 by step 80K when the model needs to lock in. With 400K steps, LR is still 0.017 at the same point — too high to hold the grokking basin, leading to post-grokking ejection.
+Counterintuitively, training for fewer steps improves stability. The 67p model trains for just 60K steps (vs 120K for 74p), with grokking at step 46K. With cosine learning rate decay, the shorter budget means faster LR decay, which helps lock in the grokking basin once found.
 
-### 3.5 Digit Curriculum
+### 3.5 No Adaptive Weight Decay (67p)
+
+The 74p model required adaptive weight decay (dropping WD when grokking detected) to converge. The 67p model does not — constant WD=0.01 suffices. This may be because the sinusoidal positions provide a more structured starting point that reduces the search space, or because the faster training schedule (60K steps) naturally provides enough WD pressure at the right time.
+
+### 3.6 Digit Curriculum
 
 Training starts with small numbers and gradually increases:
 - Steps 0–2K: 1-3 digit numbers
@@ -170,7 +183,7 @@ This helps the model learn the basic digit-addition circuit before encountering 
 
 ## 4. The Compression Journey
 
-### 4.1 From 242p to 75p: Nine Architectural Steps
+### 4.1 From 242p to 67p: Eleven Architectural Steps
 
 Each step was validated at 100% accuracy (10,010/10,010):
 
@@ -186,8 +199,10 @@ Each step was validated at 100% accuracy (10,010/10,010):
 | 7 | 100p | Rank-1 attention output, no FFN bias | -33p |
 | 8 | 78p | Shared norms + tied V/output, no position correction | -22p |
 | 9 | 75p | Freeze PLUS/EOS positions to zero | -3p |
+| 10 | 74p | Tie A=B (circular embedding) + carry-mix training | -1p |
+| 11 | **67p** | **Sinusoidal positions (freeze spiral) + qk_dim 5→4** | **-7p** |
 
-The final step to 74p combined tying A=B in the token arc (1p architectural saving) with the carry-mix training breakthrough that made the result reproducible.
+The step to 67p combined two independent compressions: freezing all spiral parameters to fixed sinusoidal values (saving 4p) and reducing the Q/K projection dimension from 5 to 4 (saving 3p). Both were motivated by analysis of the 74p trained weights showing that the spiral parameters converged near sinusoidal defaults and the 5th Q/K dimension was dead (all near-zero).
 
 ### 4.2 The Key Insight: One Head Beats Two
 
@@ -197,12 +212,14 @@ The single largest architectural change was step 6: shrinking from d_model=6 wit
 
 A recurring pattern: constraints that fail at one scale succeed at another.
 
-| Constraint | d_model=6 (170p) | d_model=5 (74p) |
-|-----------|-------------------|-------------------|
-| Shared RMSNorm | Failed (61.5%) | Works perfectly |
-| Rank-1 out_proj | Failed (0.08%) | Works perfectly |
-| No FFN bias | Required for convergence | Unnecessary |
-| Tied V/output | Destroys output (94% error) | Beneficial regularization |
+| Constraint | d_model=6 (170p) | d_model=5 (74p) | d_model=5 (67p) |
+|-----------|-------------------|-------------------|-------------------|
+| Shared RMSNorm | Failed (61.5%) | Works | Works |
+| Rank-1 out_proj | Failed (0.08%) | Works | Works |
+| No FFN bias | Required for convergence | Unnecessary | Unnecessary |
+| Tied V/output | Destroys output (94% error) | Works | Works |
+| Frozen spiral | — | — | Works (saves 4p) |
+| qk_dim=4 | — | — | Works (saves 3p) |
 
 This meant we couldn't plan a compression roadmap in advance. Each scale required re-testing every assumption.
 
@@ -243,30 +260,33 @@ Even freezing a single parameter to zero changes which seeds can find the soluti
 
 ## 6. The Discoverability Gap
 
-Three hand-coded addition transformers prove that 36-40 parameters suffice representationally. Our trained model needs 74 — a 1.85× overhead. This gap measures the price SGD pays for not knowing the solution in advance.
+Three hand-coded addition transformers prove that 36-40 parameters suffice representationally. Our trained model needs 67 — a 1.68× overhead (down from 1.85× at 74p). This gap measures the price SGD pays for not knowing the solution in advance.
 
 | Threshold | Params | What it means |
 |-----------|--------|---------------|
 | Representational floor | 36-40p | Hand-coded proof of concept |
-| **Trained from scratch** | **74p** | **What SGD discovers (this work)** |
+| **Trained from scratch** | **67p** | **What SGD discovers (this work)** |
+| Previous best | 74p | Before sinusoidal positions + qk_dim=4 |
 
-The overhead pays for: learned normalization weights (5p) that SGD can't avoid, richer position encoding (10p vs 0p) because SGD can't use the extreme weight magnitudes hand-coded models employ, and softer carry thresholds that require more capacity to approximate.
+The overhead pays for: learned normalization weights (5p) that SGD can't avoid, richer carry position encoding (3p for z_hi vs 0p in hand-coded models), and softer carry thresholds that require more capacity to approximate. The reduction from 74p to 67p came from eliminating parameters the model wasn't meaningfully using: spiral values that converged near sinusoidal defaults (4p) and a dead Q/K dimension (3p).
 
-What SGD *can* do that surprises: learn circular embeddings from 3 parameters, discover that weight tying works even when analysis says it shouldn't, and spontaneously converge toward minimal complexity (A→B ratio → 1, slope → 0, out_proj → effectively 1D).
+What SGD *can* do that surprises: learn circular embeddings from 3 parameters, discover that weight tying works even when analysis says it shouldn't, spontaneously converge toward minimal complexity (A→B ratio → 1, slope → 0, out_proj → effectively 1D), and operate with fixed sinusoidal positions when given enough capacity elsewhere.
 
 ---
 
 ## 7. Open Questions and Future Directions
 
-### 7.1 The Near-Grok Plateau (70p)
+### 7.1 The Sub-67p Frontier
 
-At 70 parameters (freezing all spiral positions to make them sinusoidal — free by competition rules), models reach 73.5% exact / 97.5% token accuracy and oscillate indefinitely. This is qualitatively different from 74p where seeds either fully grok (100%) or fail completely (<1%). The model finds a partial carry circuit that handles most additions but can't stabilize the last 2.5% of digits.
+The 67p model shows that sinusoidal positions and reduced Q/K dimensionality are viable. The next compression targets are:
 
-Can training innovations close this gap? SWA (averaging over the oscillation trajectory), warm restarts, lower minimum learning rate, or late carry-mix re-injection are untested approaches. If any of these push 70p to 100%, the effective parameter count drops to 70 (sinusoidal positions are free by competition rules).
+- **q_proj structure**: The q_proj (12p) is now the largest single parameter block. Structured constraints (Toeplitz, circulant, or low-rank factorization) could reduce it further.
+- **Fewer special positions**: The EQUALS position (3p) might be replaceable with a fixed value near pos[0], since the trained EQUALS position has similar direction to pos[0].
+- **Smaller norm**: The shared RMSNorm (5p) could potentially be replaced with a scalar or per-subspace scalar.
 
 ### 7.2 Structured Projections
 
-The q_proj (15p) is the largest single parameter block. Toeplitz or circulant constraints (constant diagonals) would reduce it to 7 parameters, but diagnostics show the trained matrix has no exploitable structure. Could a different basis (DFT, Hadamard) with learned scales work? This would be a qualitatively different kind of projection that SGD might discover differently.
+The q_proj (12p) is now the largest single parameter block. At 4×3 it is more compact than the previous 5×3, and the removal of the dead 5th row suggests further structure may be exploitable. Toeplitz or circulant constraints (constant diagonals) would reduce it to 6 parameters. Could a different basis (DFT, Hadamard) with learned scales work?
 
 ### 7.3 Knowledge Distillation
 
@@ -278,7 +298,7 @@ Our model exhibits textbook grokking: sudden generalization after prolonged memo
 
 ### 7.5 Minimum Viable Transformer
 
-Is there a theoretical lower bound on trained transformer parameters for N-digit addition? The representational floor is ~36p, but how much overhead does learnability fundamentally require? As we push below 74p, are we approaching a hard boundary or will clever architecture+training keep finding savings?
+Is there a theoretical lower bound on trained transformer parameters for N-digit addition? The representational floor is ~36p, but how much overhead does learnability fundamentally require? At 67p, the overhead factor is 1.68× — steadily shrinking from 1.85× at 74p. Are we approaching a hard boundary or will clever architecture+training keep finding savings?
 
 ---
 
@@ -287,22 +307,28 @@ Is there a theoretical lower bound on trained transformer parameters for N-digit
 ### Training Command
 
 ```bash
-uv run python -m microadder.train --run-name 74p_reproduction --seed 45214
+# 67p (default)
+uv run python -m microadder.train --run-name sub100_67p_repro --seed 71046
+
+# 74p (learned spiral, full qk_dim)
+uv run python -m microadder.train --run-name sub100_74p_repro --seed 45214 \
+    --qk-dim 0 --freeze-spiral "" --wd-adaptive --steps 120000 \
+    --carry-mix-fade-start 10000 --carry-mix-fade-end 80000
 ```
 
-Default hyperparameters match our best configuration. Three known good seeds: 45214, 71046, 78988 — all three grok with the default recipe.
+Default hyperparameters match the 67p configuration. Known good seed: 71046.
 
 ### Verification
 
 ```bash
-uv run python ../AdderBoard/verify.py submission_74p/submission_74p.py
+uv run python ../AdderBoard/verify.py submission_67p/submission_67p.py
 ```
 
 Expected output: 10010/10010 correct (100.00%), QUALIFIED.
 
 ### Hardware
 
-Trained on a single GPU. Training takes ~120K steps (~15-30 minutes depending on hardware). The model has 74 parameters — inference is essentially instant.
+Trained on a single GPU. The 67p model trains for 60K steps (~5 minutes). Inference is essentially instant.
 
 ---
 
@@ -321,7 +347,7 @@ This work builds on:
 ```bibtex
 @misc{zarechnev2026microadder,
   author       = {Arseniy Zarechnev and Claude},
-  title        = {74 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition},
+  title        = {67 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition},
   year         = {2026},
   url          = {https://github.com/evindor/MicroAdder},
 }

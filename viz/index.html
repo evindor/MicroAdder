@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MicroAdder: 74 Parameters, Perfect Addition</title>
+<title>MicroAdder: 67 Parameters, Perfect Addition</title>
 <style>
 /* ── Reset & Base ─────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -451,9 +451,9 @@ footer {
 
 <header>
   <div class="container">
-    <h1>MicroAdder: 74 Parameters, Perfect Addition</h1>
+    <h1>MicroAdder: 67 Parameters, Perfect Addition</h1>
     <p class="subtitle">An interactive exploration of a single-layer transformer that learned to add any two 10-digit numbers with 100% accuracy</p>
-    <span class="param-badge">74 trainable parameters &mdash; 100% accuracy (10010/10010)</span>
+    <span class="param-badge">67 trainable parameters &mdash; 100% accuracy (10010/10010)</span>
   </div>
 </header>
 
@@ -480,23 +480,23 @@ footer {
 <!-- ─────────── Section 2: Architecture Overview ─────────── -->
 <section id="sec-arch">
   <h2>Architecture Overview</h2>
-  <p class="section-desc">A 1-layer causal decoder with d_model=5, split into a 2D token subspace and a 3D position subspace. Every component is tightly optimized for parameter efficiency.</p>
+  <p class="section-desc">A 1-layer causal decoder with d_model=5, qk_dim=4, split into a 2D token subspace and a 3D position subspace. Sinusoidal positions (frozen) and every component tightly optimized for parameter efficiency.</p>
   <div class="viz-panel" style="max-width:700px;">
     <table class="arch-table">
       <thead><tr><th>Component</th><th>Description</th><th class="param-count">Params</th></tr></thead>
       <tbody>
         <tr><td>tok_arc</td><td>Circular token embedding (A, start, stride)</td><td class="param-count">3</td></tr>
-        <tr><td>spiral</td><td>Spiral position encoding (amp, phase, slope, offset)</td><td class="param-count">4</td></tr>
+        <tr><td>spiral</td><td>Sinusoidal position encoding (frozen)</td><td class="param-count">0</td></tr>
         <tr><td>z_hi_pos</td><td>Carry-out position (3D)</td><td class="param-count">3</td></tr>
         <tr><td>equals_pos</td><td>EQUALS special position (PLUS/EOS frozen at 0)</td><td class="param-count">3</td></tr>
         <tr><td>q_phase</td><td>Phase rotation angle for Q/K asymmetry</td><td class="param-count">1</td></tr>
-        <tr><td>q_proj</td><td>Shared Q/K projection (3 &rarr; 5)</td><td class="param-count">15</td></tr>
+        <tr><td>q_proj</td><td>Shared Q/K projection (3 &rarr; 4)</td><td class="param-count">12</td></tr>
         <tr><td>out_proj</td><td>Rank-1 attention output (5+5)</td><td class="param-count">10</td></tr>
         <tr><td>fc1</td><td>FFN first layer (5 &rarr; 2, no bias)</td><td class="param-count">10</td></tr>
         <tr><td>fc2</td><td>FFN second layer (2 &rarr; 5, no bias)</td><td class="param-count">10</td></tr>
         <tr><td>head_proj</td><td>Output head / V projection (5 &rarr; 2)</td><td class="param-count">10</td></tr>
         <tr><td>norm_weight</td><td>Shared RMSNorm (1 weight, 3 uses)</td><td class="param-count">5</td></tr>
-        <tr><td colspan="2" style="font-weight:700;color:#f0f6fc;">Total</td><td class="param-count" style="font-weight:700;color:#7ee787;">74</td></tr>
+        <tr><td colspan="2" style="font-weight:700;color:#f0f6fc;">Total</td><td class="param-count" style="font-weight:700;color:#7ee787;">67</td></tr>
       </tbody>
     </table>
   </div>
@@ -505,7 +505,7 @@ footer {
 <!-- ─────────── Section 3: Token Embeddings ─────────── -->
 <section id="sec-tok">
   <h2>Token Embeddings</h2>
-  <p class="section-desc">All 10 digits live on a circular arc of radius 12.99. Only 3 parameters define the entire embedding table. The y-coordinate increases monotonically with digit value, which is critical for the model's carry detection.</p>
+  <p class="section-desc">All 10 digits live on a circular arc of radius 6.06. Only 3 parameters define the entire embedding table. The y-coordinate increases monotonically with digit value, which is critical for the model's carry detection.</p>
   <div class="viz-grid">
     <div class="viz-panel">
       <h3>Circular Arc</h3>
@@ -529,16 +529,16 @@ footer {
 <!-- ─────────── Section 4: Position Encoding ─────────── -->
 <section id="sec-pos">
   <h2>Position Encoding</h2>
-  <p class="section-desc">Positions are 3D vectors. The 10 digit positions form a spiral (shared across X, Y, Z). The carry position z_hi is <strong>12x farther</strong> from the origin than digit positions, making it impossible to confuse with any digit.</p>
+  <p class="section-desc">Positions are 3D vectors. The 10 digit positions use frozen sinusoidal encoding (shared across X, Y, Z). The carry position z_hi is <strong>~4x farther</strong> from the origin than digit positions, making it hard to confuse with any digit.</p>
   <div class="viz-grid">
     <div class="viz-panel">
-      <h3>Spiral Digit Positions (Top View: dims 0-1)</h3>
-      <p class="panel-desc">The 10 digit positions trace a circle with a slight upward drift in dim2.</p>
+      <h3>Sinusoidal Digit Positions (Top View: dims 0-1)</h3>
+      <p class="panel-desc">The 10 digit positions trace a circle (frozen sinusoidal) with a slight upward drift in dim2.</p>
       <svg id="svgPosSpiral" width="380" height="340"></svg>
     </div>
     <div class="viz-panel">
       <h3>Position Norms</h3>
-      <p class="panel-desc">The carry position (z_hi) has norm 49.2, dwarfing digit positions (~4.0). This extreme separation ensures the model never confuses the carry slot with a digit.</p>
+      <p class="panel-desc">The carry position (z_hi) has norm ~16.2, larger than digit positions (~3.5). This separation helps the model distinguish the carry slot from digits.</p>
       <svg id="svgPosNorms" width="380" height="280"></svg>
     </div>
   </div>
@@ -547,7 +547,7 @@ footer {
 <!-- ─────────── Section 5: Attention ─────────── -->
 <section id="sec-attn">
   <h2>Attention Pattern</h2>
-  <p class="section-desc">Q and K are computed from position only (not content), so the attention pattern is <strong>fixed</strong> regardless of the input numbers. A 41.3-degree phase rotation shifts Q to create lookahead: each answer digit Z[i] attends ~50/50 to X[i+1] and Y[i+1], gathering the next column's digits for carry computation.</p>
+  <p class="section-desc">Q and K are computed from position only (not content), so the attention pattern is <strong>fixed</strong> regardless of the input numbers. A &minus;29.4-degree phase rotation (qk_dim=4) shifts Q to create lookahead: each answer digit Z[i] attends to nearby X and Y positions, gathering digits for carry computation.</p>
   <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
     <h3>Attention Weights for Answer Positions</h3>
     <div class="attn-controls">
@@ -605,7 +605,7 @@ footer {
 
 <footer>
   <div class="container">
-    MicroAdder 74p &mdash; Arseniy Zarechnev &mdash; 100% accuracy on 10-digit addition with 74 parameters, trained from scratch
+    MicroAdder 67p &mdash; Arseniy Zarechnev &mdash; 100% accuracy on 10-digit addition with 67 parameters, trained from scratch
   </div>
 </footer>
 
@@ -618,57 +618,56 @@ footer {
 // ── Model Weights (exact trained values) ────────────────────────────
 
 const W = {
-  tok_arc_A: 12.98625659942627,
-  tok_arc_start: -0.5325474739074707,
-  tok_arc_stride: 0.12126827985048294,
+  tok_arc_A: 6.064079,
+  tok_arc_start: -0.490179,
+  tok_arc_stride: 0.138667,
 
-  spiral_amp: 3.5629539489746094,
-  spiral_phase: -0.44202908873558044,
-  spiral_slope: 0.16935835778713226,
-  spiral_offset: -2.5476369857788086,
+  spiral_amp: 3.5,
+  spiral_phase: 0.0,
+  spiral_slope: 0.15,
+  spiral_offset: 0.0,
 
-  z_hi_pos: [36.013221740722656, -32.8335075378418, 6.451801776885986],
-  equals_pos: [2.643782138824463, -2.4135334491729736, -1.0327739715576172],
+  z_hi_pos: [3.073271, -1.403966, 15.874219],
+  equals_pos: [3.470619, -1.040053, 0.994751],
   plus_pos: [0, 0, 0],
   eos_pos: [0, 0, 0],
 
   q_proj: [
-    [-3.3758723735809326, 3.0420241355895996, -0.649680495262146],
-    [0.4778011739253998, -3.5909056663513184, -0.21074101328849792],
-    [-2.5151782035827637, -2.4981131553649902, 1.4583498239517212],
-    [3.494783639907837, 1.6766266822814941, -0.04256149008870125],
-    [5.520339046993783e-11, -6.236756250332931e-11, 9.29238543750932e-12]
+    [-2.462873, -0.472051,  0.315342],
+    [-1.877643,  1.486909,  1.099144],
+    [-0.792821,  2.210805, -1.530270],
+    [ 1.481666,  2.263654,  0.268334]
   ],
 
-  q_phase_angle: 0.7201472520828247,
+  q_phase_angle: -0.512560,
 
-  out_proj_A: [-0.017880216240882874, -1.3864089250564575, 0.0034796218387782574, 0.022127795964479446, -0.04294605180621147],
-  out_proj_B: [-0.01825825497508049, -1.5926258563995361, 0.03635707497596741, -0.0012742633698508143, 0.07176491618156433],
+  out_proj_A: [0.078231, -0.809933, -0.061855, 0.001240, -0.655522],
+  out_proj_B: [0.046148, -0.715690, -0.009938, 0.011434, -0.002321],
 
-  norm_weight: [0.40147387981414795, 6.573720932006836, 3.179816722869873, 3.1144793033599854, 4.9836039543151855],
+  norm_weight: [7.960984, 13.595810, 2.397511, 2.407397, 3.523559],
 
   fc1: [
-    [-0.17250022292137146, 1.3935737609863281, -0.5115558505058289, -0.009794006124138832, -0.8693745136260986],
-    [-0.8128036856651306, -1.3037818670272827, 0.011638500727713108, 0.18516352772712708, 0.36610937118530273]
+    [0.409873, -0.836150, -0.262240, 0.024122, -1.655446],
+    [0.449363, 0.839487, -0.165511, -0.115800, -1.464789]
   ],
 
   fc2: [
-    [-0.7267451882362366, -0.756547212600708],
-    [-1.9356893301010132, 2.1084463596343994],
-    [0.07229673862457275, -0.020406214520335197],
-    [0.22550664842128754, 0.14927224814891815],
-    [1.5158196687698364, 1.478060245513916]
+    [-0.950666, -0.871497],
+    [0.665394, -0.901238],
+    [-0.002438, -0.056473],
+    [0.005143, 0.049685],
+    [-0.026858, -0.048339]
   ],
 
   head_proj: [
-    [-21.45644187927246, 0.2799067497253418, 1.0584447383880615, 2.5355472564697266, 12.424424171447754],
-    [-2.098896026611328, -4.889176368713379, 0.0004738209245260805, 0.11796916276216507, -0.16181060671806335]
+    [-10.044181, 0.088397, -0.537309, 0.708696, -0.114469],
+    [-0.059638, -4.016446, -0.505348, 0.143598, -0.739328]
   ]
 };
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const VOCAB = 10, D = 5, TOK_DIM = 2, POS_DIM = 3, HEAD_DIM = 5, FFN_DIM = 2;
+const VOCAB = 10, D = 5, TOK_DIM = 2, POS_DIM = 3, HEAD_DIM = 5, QK_DIM = 4, FFN_DIM = 2;
 const MAX_DIGITS = 10, ANSWER_LEN = 11, SEQ_LEN = 34;
 const X_START = 0, PLUS_POS = 10, Y_START = 11, EQ_POS = 21, Z_START = 22, Z_HI_POS_IDX = 32, EOS_POS = 33;
 
@@ -770,8 +769,8 @@ function applyQPhase(q) {
   const c = Math.cos(W.q_phase_angle);
   const s = Math.sin(W.q_phase_angle);
   const r = vecCopy(q);
-  // Rotate pairs (0,1) and (2,3). Dim 4 untouched.
-  for (let p = 0; p < Math.floor(HEAD_DIM / 2); p++) {
+  // Rotate pairs (0,1) and (2,3). QK_DIM=4, so 2 pairs, no leftover.
+  for (let p = 0; p < QK_DIM / 2; p++) {
     const d0 = 2 * p, d1 = 2 * p + 1;
     r[d0] = q[d0] * c - q[d1] * s;
     r[d1] = q[d0] * s + q[d1] * c;
@@ -844,7 +843,7 @@ function fullInference(aNum, bNum) {
 
     // ── Step 5: Attention for last position ──
     const lastQ = Qs[T - 1];
-    const scale = Math.sqrt(HEAD_DIM);
+    const scale = Math.sqrt(QK_DIM);
     const attnScores = [];
     for (let t = 0; t < T; t++) {
       attnScores.push(dot(lastQ, Ks[t]) / scale);
@@ -1089,8 +1088,8 @@ function drawTokenArc() {
   const table = tokEmbTable();
   const tooltip = document.getElementById('tokTooltip');
 
-  // Scale factor: table values are ~13 radius, we want ~140px
-  const scale = 10;
+  // Scale factor: table values are ~6 radius, we want ~130px
+  const scale = 21;
 
   let html = '';
 
@@ -1523,7 +1522,7 @@ function drawLogits() {
   html += '<div>';
   html += '<svg width="280" height="280" id="svgLogitSpace">';
 
-  const scale = 9;
+  const scale = 19;
   const cx = 140, cy = 140;
 
   // Faint reference circle

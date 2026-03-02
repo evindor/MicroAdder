@@ -91,7 +91,11 @@ def main():
 
     # Load checkpoint
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    cfg = ModelConfig.from_dict(ckpt["config"])
+    raw_cfg = ckpt["config"]
+    # Handle both old (flat) and new (nested) config formats
+    if "model" in raw_cfg and isinstance(raw_cfg["model"], dict):
+        raw_cfg = raw_cfg["model"]
+    cfg = ModelConfig.from_dict(raw_cfg)
     model = MicroAdder(cfg).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
