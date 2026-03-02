@@ -1,4 +1,4 @@
-# 67 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition
+# Training a Transformer for Perfect 10-Digit Addition
 
 **Arseniy Zarechnev and Claude**
 
@@ -12,7 +12,7 @@ We train a 67-parameter autoregressive transformer that performs 10-digit additi
 
 Starting from a 242-parameter baseline, we achieve a 72% compression through eleven architectural innovations: a single full-rank attention head, parametric circular token embeddings, tied Q/K projections with phase rotation, tied V/output weights, shared normalization, rank-1 attention output, frozen delimiter positions, reduced Q/K dimensionality, and sinusoidal positional encoding. A training breakthrough — high carry-mix curriculum with step-based fade — improved the grokking rate from ~10% to 100% of random seeds, making the result reproducible.
 
-The model is the smallest known trained transformer achieving perfect 10-digit addition.
+The model is the smallest known **trained** transformer achieving perfect 10-digit addition.
 
 ---
 
@@ -347,7 +347,7 @@ This work builds on:
 ```bibtex
 @misc{zarechnev2026microadder,
   author       = {Arseniy Zarechnev and Claude},
-  title        = {67 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition},
+  title        = {Training a Transformer for Perfect 10-Digit Addition},
   year         = {2026},
   url          = {https://github.com/evindor/MicroAdder},
 }
