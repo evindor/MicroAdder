@@ -138,17 +138,7 @@ The model learns addition through **grokking** — a sudden phase transition fro
 3. **Oscillation** (40-80K): The model bounces between 50-100% exact match as the circuit stabilizes.
 4. **Lock-in** (80K+): Exact match reaches 100% and stays.
 
-### 3.2 Adaptive Weight Decay
-
-The carry circuit needs large weights to approximate hard step functions (the hand-coded param_40 model uses values of ~60,000). Standard weight decay fights this sharpening process. Adaptive weight decay resolves the tension:
-
-- **Base**: wd = 0.01
-- **Stage 1** (wd × 0.1): triggered when val_exact > 2%
-- **Stage 2** (wd × 0.01): triggered when val_exact > 20%
-
-This gives the model freedom to sharpen its carry circuit once grokking begins, producing an 18× speedup compared to constant weight decay.
-
-### 3.3 Carry-Mix Curriculum: The Training Breakthrough
+### 3.2 Carry-Mix Curriculum: The Training Breakthrough
 
 The single most impactful training innovation was aggressive carry-focused sampling with step-based fade. Long carry chains (e.g., 9999999999 + 1 = 10000000000) are exponentially rare in uniform sampling but represent the hardest test cases. Our approach:
 
@@ -162,15 +152,15 @@ This last point was critical. Our earlier approach used metric-triggered fade (r
 
 The 67p model uses a tighter fade window (15K-45K vs 10K-80K), matching its faster grokking dynamics.
 
-### 3.4 Shorter Step Budget
+### 3.3 Shorter Step Budget
 
 Counterintuitively, training for fewer steps improves stability. The 67p model trains for just 60K steps (vs 120K for 74p), with grokking at step 46K. With cosine learning rate decay, the shorter budget means faster LR decay, which helps lock in the grokking basin once found.
 
-### 3.5 No Adaptive Weight Decay (67p)
+### 3.4 No Adaptive Weight Decay (67p)
 
 The 74p model required adaptive weight decay (dropping WD when grokking detected) to converge. The 67p model does not — constant WD=0.01 suffices. This may be because the sinusoidal positions provide a more structured starting point that reduces the search space, or because the faster training schedule (60K steps) naturally provides enough WD pressure at the right time.
 
-### 3.6 Digit Curriculum
+### 3.5 Digit Curriculum
 
 Training starts with small numbers and gradually increases:
 - Steps 0–2K: 1-3 digit numbers
@@ -243,18 +233,6 @@ Not everything worked. The negative results were as informative as the successes
 - **SAM (Sharpness-Aware Minimization)**: The adversarial weight perturbation disrupts delicate feature learning. Uniformly worse than vanilla AdamW at all tested scales.
 - **WD scheduling variants**: Scheduled drops, cyclical oscillation, and warmup-then-adaptive all produced identical failure modes. The grokking bottleneck at small scales is seed/initialization, not weight decay timing.
 - **Metric-based carry_mix fade at high carry_mix**: Creates an oscillation feedback loop that never converges. Step-based fade was the fix.
-
-### 5.3 The Grokking Lottery
-
-A 10-seed sweep revealed that grokking is highly seed-dependent and, more surprisingly, config-specific:
-
-- Seed 78779 groks 75p (reaching 95.8% exact) but completely fails 72p
-- Seed 67086 fails 75p but approaches 100% at 72p
-- Only seed 80085 worked for both configurations
-
-Even freezing a single parameter to zero changes which seeds can find the solution. The loss landscape topology shifts with every architectural constraint.
-
-**Flash grokking**: Some seeds briefly achieve near-perfect accuracy (95.8% exact at 33K steps) then crash completely. The carry circuit crystallizes in a basin too shallow to maintain under continued gradient updates. The high carry-mix training recipe stabilizes these transient solutions by ensuring the carry circuit has been thoroughly exercised before the learning rate decays.
 
 ---
 
