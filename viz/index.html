@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MicroAdder: 74 Parameters, Perfect Addition</title>
+<style>
+/* ── Reset & Base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #0d1117;
+  color: #c9d1d9;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Layout ───────────────────────────────────────────────── */
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+header {
+  text-align: center;
+  padding: 48px 0 32px;
+  border-bottom: 1px solid #21262d;
+}
+header h1 {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: #f0f6fc;
+  margin-bottom: 8px;
+}
+header .subtitle {
+  font-size: 1.1rem;
+  color: #8b949e;
+  max-width: 600px;
+  margin: 0 auto;
+}
+header .param-badge {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 4px 16px;
+  background: linear-gradient(135deg, #1f6feb33, #238636aa);
+  border: 1px solid #238636;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  color: #7ee787;
+  font-weight: 600;
+}
+
+section {
+  padding: 40px 0;
+  border-bottom: 1px solid #21262d;
+}
+section:last-child { border-bottom: none; }
+section h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #f0f6fc;
+  margin-bottom: 8px;
+}
+section .section-desc {
+  color: #8b949e;
+  margin-bottom: 24px;
+  max-width: 800px;
+}
+
+/* ── Try It Section ───────────────────────────────────────── */
+.try-it-box {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 28px;
+  max-width: 700px;
+  margin: 0 auto;
+}
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+.input-row input[type="text"] {
+  width: 200px;
+  padding: 10px 14px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  color: #f0f6fc;
+  font-size: 1.1rem;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  text-align: right;
+  transition: border-color 0.2s;
+}
+.input-row input:focus {
+  outline: none;
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 3px #58a6ff22;
+}
+.input-row .op {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #8b949e;
+}
+.btn-compute {
+  display: block;
+  margin: 0 auto;
+  padding: 10px 32px;
+  background: linear-gradient(135deg, #238636, #2ea043);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-compute:hover { filter: brightness(1.15); transform: translateY(-1px); }
+.btn-compute:active { transform: translateY(0); }
+.btn-random {
+  display: inline-block;
+  margin: 12px auto 0;
+  padding: 6px 18px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #8b949e;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-random:hover { background: #30363d; color: #c9d1d9; }
+.buttons-row { text-align: center; }
+
+/* Result display */
+.result-display {
+  margin-top: 24px;
+  text-align: center;
+  min-height: 60px;
+}
+.seq-display {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 1rem;
+}
+.seq-tok {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 36px;
+  border-radius: 4px;
+  font-weight: 600;
+  transition: all 0.3s;
+  position: relative;
+}
+.seq-tok.x-digit { background: #1f6feb22; color: #79c0ff; }
+.seq-tok.y-digit { background: #da3633aa; color: #ffa198; background: #da363322; }
+.seq-tok.z-digit { background: #23863622; color: #7ee787; }
+.seq-tok.z-digit.carry { background: #da363322; color: #ffa198; }
+.seq-tok.special { color: #8b949e; font-weight: 400; }
+.seq-tok.active {
+  box-shadow: 0 0 12px #58a6ff88;
+  border: 1px solid #58a6ff;
+}
+.seq-tok.generating {
+  animation: pulse 0.6s ease-in-out;
+}
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+.seq-labels {
+  display: flex;
+  justify-content: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  font-size: 0.65rem;
+  color: #484f58;
+}
+
+/* ── Visualization Panels ─────────────────────────────────── */
+.viz-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+@media (max-width: 900px) {
+  .viz-grid { grid-template-columns: 1fr; }
+}
+.viz-panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 20px;
+  overflow: hidden;
+}
+.viz-panel h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #f0f6fc;
+  margin-bottom: 4px;
+}
+.viz-panel .panel-desc {
+  font-size: 0.82rem;
+  color: #8b949e;
+  margin-bottom: 16px;
+}
+.viz-panel svg { display: block; margin: 0 auto; }
+
+/* ── Token Embedding Circle ───────────────────────────────── */
+.tok-tooltip {
+  position: absolute;
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  pointer-events: none;
+  z-index: 100;
+  color: #c9d1d9;
+  font-family: monospace;
+  white-space: nowrap;
+  display: none;
+}
+
+/* ── Attention Heatmap ────────────────────────────────────── */
+.attn-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.attn-controls label {
+  font-size: 0.82rem;
+  color: #8b949e;
+}
+.attn-controls select {
+  padding: 4px 8px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #c9d1d9;
+  font-size: 0.82rem;
+}
+
+/* ── Forward Pass Step Viz ────────────────────────────────── */
+.step-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.step-controls label {
+  font-size: 0.85rem;
+  color: #8b949e;
+}
+.step-controls select, .step-controls input {
+  padding: 4px 8px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #c9d1d9;
+  font-size: 0.82rem;
+}
+.step-stage {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.step-stage h4 {
+  font-size: 0.9rem;
+  color: #f0f6fc;
+  margin-bottom: 8px;
+}
+.step-stage .stage-info {
+  font-size: 0.78rem;
+  color: #8b949e;
+  margin-bottom: 8px;
+}
+.bar-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 80px;
+  padding-top: 4px;
+}
+.bar-chart .bar-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+}
+.bar-chart .bar {
+  width: 100%;
+  max-width: 40px;
+  border-radius: 3px 3px 0 0;
+  transition: height 0.3s;
+  position: relative;
+}
+.bar-chart .bar-label {
+  font-size: 0.65rem;
+  color: #484f58;
+  margin-top: 3px;
+}
+.bar-chart .bar-val {
+  font-size: 0.6rem;
+  color: #8b949e;
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+
+/* ── Carry Propagation ────────────────────────────────────── */
+.carry-chain {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.carry-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 44px;
+}
+.carry-cell .digit-sum {
+  font-size: 0.7rem;
+  color: #8b949e;
+  font-family: monospace;
+}
+.carry-cell .carry-arrow {
+  font-size: 0.65rem;
+  margin: 2px 0;
+}
+.carry-cell .result-digit {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 1rem;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.carry-cell .result-digit.no-carry { background: #23863633; color: #7ee787; }
+.carry-cell .result-digit.has-carry { background: #da363333; color: #ffa198; }
+.carry-cell .pos-label {
+  font-size: 0.6rem;
+  color: #484f58;
+  margin-top: 2px;
+}
+
+/* ── Logits bar chart ─────────────────────────────────────── */
+.logits-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 100px;
+  margin-top: 8px;
+}
+.logits-chart .logit-bar-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  justify-content: flex-end;
+}
+.logits-chart .logit-bar {
+  width: 100%;
+  max-width: 30px;
+  border-radius: 3px 3px 0 0;
+  transition: height 0.3s;
+}
+.logits-chart .logit-label {
+  font-size: 0.7rem;
+  color: #484f58;
+  margin-top: 3px;
+  font-family: monospace;
+}
+.logits-chart .logit-bar.winner { box-shadow: 0 0 8px #7ee78866; }
+
+/* ── Full-width panels ────────────────────────────────────── */
+.viz-panel.full-width {
+  grid-column: 1 / -1;
+}
+
+/* ── Misc ─────────────────────────────────────────────────── */
+.mono { font-family: 'SF Mono', 'Cascadia Code', monospace; }
+.dim-tok { color: #79c0ff; }
+.dim-pos { color: #d2a8ff; }
+.muted { color: #8b949e; font-size: 0.85rem; }
+.insight {
+  background: #1f6feb11;
+  border-left: 3px solid #1f6feb;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 0.85rem;
+  border-radius: 0 6px 6px 0;
+}
+.insight strong { color: #79c0ff; }
+
+/* Architecture overview */
+.arch-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin-top: 12px;
+}
+.arch-table th, .arch-table td {
+  padding: 6px 12px;
+  text-align: left;
+  border-bottom: 1px solid #21262d;
+}
+.arch-table th {
+  color: #8b949e;
+  font-weight: 500;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.arch-table td { font-family: monospace; font-size: 0.82rem; }
+.arch-table tr:hover { background: #1f6feb08; }
+.arch-table .param-count { color: #7ee787; text-align: right; }
+
+footer {
+  text-align: center;
+  padding: 24px 0;
+  color: #484f58;
+  font-size: 0.8rem;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <h1>MicroAdder: 74 Parameters, Perfect Addition</h1>
+    <p class="subtitle">An interactive exploration of a single-layer transformer that learned to add any two 10-digit numbers with 100% accuracy</p>
+    <span class="param-badge">74 trainable parameters &mdash; 100% accuracy (10010/10010)</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ─────────── Section 1: Try It ─────────── -->
+<section id="sec-try">
+  <h2>Try It</h2>
+  <p class="section-desc">Enter two numbers (up to 10 digits) and watch the model compute the sum digit by digit. The sequence is LSB-first: least significant digit on the left.</p>
+  <div class="try-it-box">
+    <div class="input-row">
+      <input type="text" id="inputA" value="1234567890" maxlength="10" placeholder="First number">
+      <span class="op">+</span>
+      <input type="text" id="inputB" value="9876543210" maxlength="10" placeholder="Second number">
+    </div>
+    <div class="buttons-row">
+      <button class="btn-compute" id="btnCompute" onclick="runCompute()">Compute</button>
+      <button class="btn-random" onclick="randomize()">Random Example</button>
+    </div>
+    <div class="result-display" id="resultDisplay"></div>
+  </div>
+</section>
+
+<!-- ─────────── Section 2: Architecture Overview ─────────── -->
+<section id="sec-arch">
+  <h2>Architecture Overview</h2>
+  <p class="section-desc">A 1-layer causal decoder with d_model=5, split into a 2D token subspace and a 3D position subspace. Every component is tightly optimized for parameter efficiency.</p>
+  <div class="viz-panel" style="max-width:700px;">
+    <table class="arch-table">
+      <thead><tr><th>Component</th><th>Description</th><th class="param-count">Params</th></tr></thead>
+      <tbody>
+        <tr><td>tok_arc</td><td>Circular token embedding (A, start, stride)</td><td class="param-count">3</td></tr>
+        <tr><td>spiral</td><td>Spiral position encoding (amp, phase, slope, offset)</td><td class="param-count">4</td></tr>
+        <tr><td>z_hi_pos</td><td>Carry-out position (3D)</td><td class="param-count">3</td></tr>
+        <tr><td>equals_pos</td><td>EQUALS special position (PLUS/EOS frozen at 0)</td><td class="param-count">3</td></tr>
+        <tr><td>q_phase</td><td>Phase rotation angle for Q/K asymmetry</td><td class="param-count">1</td></tr>
+        <tr><td>q_proj</td><td>Shared Q/K projection (3 &rarr; 5)</td><td class="param-count">15</td></tr>
+        <tr><td>out_proj</td><td>Rank-1 attention output (5+5)</td><td class="param-count">10</td></tr>
+        <tr><td>fc1</td><td>FFN first layer (5 &rarr; 2, no bias)</td><td class="param-count">10</td></tr>
+        <tr><td>fc2</td><td>FFN second layer (2 &rarr; 5, no bias)</td><td class="param-count">10</td></tr>
+        <tr><td>head_proj</td><td>Output head / V projection (5 &rarr; 2)</td><td class="param-count">10</td></tr>
+        <tr><td>norm_weight</td><td>Shared RMSNorm (1 weight, 3 uses)</td><td class="param-count">5</td></tr>
+        <tr><td colspan="2" style="font-weight:700;color:#f0f6fc;">Total</td><td class="param-count" style="font-weight:700;color:#7ee787;">74</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ─────────── Section 3: Token Embeddings ─────────── -->
+<section id="sec-tok">
+  <h2>Token Embeddings</h2>
+  <p class="section-desc">All 10 digits live on a circular arc of radius 12.99. Only 3 parameters define the entire embedding table. The y-coordinate increases monotonically with digit value, which is critical for the model's carry detection.</p>
+  <div class="viz-grid">
+    <div class="viz-panel">
+      <h3>Circular Arc</h3>
+      <p class="panel-desc">Hover over any digit to see its exact coordinates.</p>
+      <div style="position:relative;">
+        <svg id="svgTokenArc" width="380" height="380"></svg>
+        <div class="tok-tooltip" id="tokTooltip"></div>
+      </div>
+    </div>
+    <div class="viz-panel">
+      <h3>Y-Coordinate vs Digit Value</h3>
+      <p class="panel-desc">The near-linear y-coordinate makes digit sum encodeable as an average.</p>
+      <svg id="svgTokenY" width="380" height="280"></svg>
+      <div class="insight">
+        <strong>Key insight:</strong> When the model averages two digit embeddings (via 50/50 attention), the y-coordinate of the average encodes x+y. The FFN then detects whether x+y &ge; 10 to determine carries.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── Section 4: Position Encoding ─────────── -->
+<section id="sec-pos">
+  <h2>Position Encoding</h2>
+  <p class="section-desc">Positions are 3D vectors. The 10 digit positions form a spiral (shared across X, Y, Z). The carry position z_hi is <strong>12x farther</strong> from the origin than digit positions, making it impossible to confuse with any digit.</p>
+  <div class="viz-grid">
+    <div class="viz-panel">
+      <h3>Spiral Digit Positions (Top View: dims 0-1)</h3>
+      <p class="panel-desc">The 10 digit positions trace a circle with a slight upward drift in dim2.</p>
+      <svg id="svgPosSpiral" width="380" height="340"></svg>
+    </div>
+    <div class="viz-panel">
+      <h3>Position Norms</h3>
+      <p class="panel-desc">The carry position (z_hi) has norm 49.2, dwarfing digit positions (~4.0). This extreme separation ensures the model never confuses the carry slot with a digit.</p>
+      <svg id="svgPosNorms" width="380" height="280"></svg>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── Section 5: Attention ─────────── -->
+<section id="sec-attn">
+  <h2>Attention Pattern</h2>
+  <p class="section-desc">Q and K are computed from position only (not content), so the attention pattern is <strong>fixed</strong> regardless of the input numbers. A 41.3-degree phase rotation shifts Q to create lookahead: each answer digit Z[i] attends ~50/50 to X[i+1] and Y[i+1], gathering the next column's digits for carry computation.</p>
+  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
+    <h3>Attention Weights for Answer Positions</h3>
+    <div class="attn-controls">
+      <label>Output position:</label>
+      <select id="attnPosSelect" onchange="drawAttnRow()"></select>
+      <span class="muted" id="attnInfo"></span>
+    </div>
+    <svg id="svgAttn" width="860" height="200"></svg>
+    <div class="insight" id="attnInsight"></div>
+  </div>
+</section>
+
+<!-- ─────────── Section 6: Forward Pass ─────────── -->
+<section id="sec-forward">
+  <h2>Step-by-Step Forward Pass</h2>
+  <p class="section-desc">Watch the 5D residual stream transform through each layer for a specific answer digit. Select which output position to inspect.</p>
+  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
+    <div class="step-controls">
+      <label>Answer digit:</label>
+      <select id="fwdStepSelect" onchange="drawForwardPass()"></select>
+      <span class="muted" id="fwdStepInfo"></span>
+    </div>
+    <div id="fwdStages"></div>
+  </div>
+</section>
+
+<!-- ─────────── Section 7: Carry Propagation ─────────── -->
+<section id="sec-carry">
+  <h2>Carry Propagation</h2>
+  <p class="section-desc">The most remarkable part: carries propagate through autoregressive generation. Each generated Z[i] token is fed back as input for generating Z[i+1]. The carry information is encoded in the token embedding of the previous answer digit.</p>
+  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
+    <h3>Digit-by-Digit Carry Chain</h3>
+    <p class="panel-desc">Green = no carry out. Red = carry out. The carry from position i is communicated through the Z[i] token fed back as input.</p>
+    <div id="carryChain"></div>
+    <div class="insight" style="margin-top:16px;">
+      <strong>How carry propagation works:</strong> The FFN has 2 hidden units: one fires when the digit sum + carry &ge; 10 (carry case), the other when it's &lt; 10 (no carry). The Z[i] token that gets fed back as input encodes whether a carry occurred, because the token embedding's y-coordinate shifts the next column's sum up or down.
+    </div>
+  </div>
+</section>
+
+<!-- ─────────── Section 8: Output Logits ─────────── -->
+<section id="sec-logits">
+  <h2>Output Logits</h2>
+  <p class="section-desc">The final 2D projection is dot-producted with each digit's circular embedding to produce 10 logits. The softmax picks the answer digit.</p>
+  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
+    <div class="step-controls">
+      <label>Answer position:</label>
+      <select id="logitStepSelect" onchange="drawLogits()"></select>
+    </div>
+    <div id="logitsContainer"></div>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <div class="container">
+    MicroAdder 74p &mdash; Arseniy Zarechnev &mdash; 100% accuracy on 10-digit addition with 74 parameters, trained from scratch
+  </div>
+</footer>
+
+<!-- ══════════════════════════════════════════════════════════
+     JAVASCRIPT: Model weights, inference, and visualizations
+     ══════════════════════════════════════════════════════════ -->
+<script>
+"use strict";
+
+// ── Model Weights (exact trained values) ────────────────────────────
+
+const W = {
+  tok_arc_A: 12.98625659942627,
+  tok_arc_start: -0.5325474739074707,
+  tok_arc_stride: 0.12126827985048294,
+
+  spiral_amp: 3.5629539489746094,
+  spiral_phase: -0.44202908873558044,
+  spiral_slope: 0.16935835778713226,
+  spiral_offset: -2.5476369857788086,
+
+  z_hi_pos: [36.013221740722656, -32.8335075378418, 6.451801776885986],
+  equals_pos: [2.643782138824463, -2.4135334491729736, -1.0327739715576172],
+  plus_pos: [0, 0, 0],
+  eos_pos: [0, 0, 0],
+
+  q_proj: [
+    [-3.3758723735809326, 3.0420241355895996, -0.649680495262146],
+    [0.4778011739253998, -3.5909056663513184, -0.21074101328849792],
+    [-2.5151782035827637, -2.4981131553649902, 1.4583498239517212],
+    [3.494783639907837, 1.6766266822814941, -0.04256149008870125],
+    [5.520339046993783e-11, -6.236756250332931e-11, 9.29238543750932e-12]
+  ],
+
+  q_phase_angle: 0.7201472520828247,
+
+  out_proj_A: [-0.017880216240882874, -1.3864089250564575, 0.0034796218387782574, 0.022127795964479446, -0.04294605180621147],
+  out_proj_B: [-0.01825825497508049, -1.5926258563995361, 0.03635707497596741, -0.0012742633698508143, 0.07176491618156433],
+
+  norm_weight: [0.40147387981414795, 6.573720932006836, 3.179816722869873, 3.1144793033599854, 4.9836039543151855],
+
+  fc1: [
+    [-0.17250022292137146, 1.3935737609863281, -0.5115558505058289, -0.009794006124138832, -0.8693745136260986],
+    [-0.8128036856651306, -1.3037818670272827, 0.011638500727713108, 0.18516352772712708, 0.36610937118530273]
+  ],
+
+  fc2: [
+    [-0.7267451882362366, -0.756547212600708],
+    [-1.9356893301010132, 2.1084463596343994],
+    [0.07229673862457275, -0.020406214520335197],
+    [0.22550664842128754, 0.14927224814891815],
+    [1.5158196687698364, 1.478060245513916]
+  ],
+
+  head_proj: [
+    [-21.45644187927246, 0.2799067497253418, 1.0584447383880615, 2.5355472564697266, 12.424424171447754],
+    [-2.098896026611328, -4.889176368713379, 0.0004738209245260805, 0.11796916276216507, -0.16181060671806335]
+  ]
+};
+
+// ── Constants ────────────────────────────────────────────────────────
+
+const VOCAB = 10, D = 5, TOK_DIM = 2, POS_DIM = 3, HEAD_DIM = 5, FFN_DIM = 2;
+const MAX_DIGITS = 10, ANSWER_LEN = 11, SEQ_LEN = 34;
+const X_START = 0, PLUS_POS = 10, Y_START = 11, EQ_POS = 21, Z_START = 22, Z_HI_POS_IDX = 32, EOS_POS = 33;
+
+// Position source map: same as Python
+function buildPosMap() {
+  const sources = [], indices = [];
+  for (let i = 0; i < 10; i++) { sources.push(0); indices.push(i); } // X
+  sources.push(2); indices.push(0); // PLUS
+  for (let i = 0; i < 10; i++) { sources.push(0); indices.push(i); } // Y
+  sources.push(2); indices.push(1); // EQUALS
+  for (let i = 0; i < 10; i++) { sources.push(0); indices.push(i); } // Z
+  sources.push(1); indices.push(0); // Z_HI (carry)
+  sources.push(2); indices.push(2); // EOS
+  return { sources, indices };
+}
+const POS_MAP = buildPosMap();
+
+// ── Vector math helpers ─────────────────────────────────────────────
+
+function vecZeros(n) { return new Float64Array(n); }
+function vecCopy(v) { return new Float64Array(v); }
+function vecAdd(a, b) { const r = vecZeros(a.length); for (let i = 0; i < a.length; i++) r[i] = a[i] + b[i]; return r; }
+function vecSub(a, b) { const r = vecZeros(a.length); for (let i = 0; i < a.length; i++) r[i] = a[i] - b[i]; return r; }
+function vecScale(v, s) { const r = vecZeros(v.length); for (let i = 0; i < v.length; i++) r[i] = v[i] * s; return r; }
+function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+function vecNorm(v) { return Math.sqrt(dot(v, v)); }
+function matVec(M, v) { // M[rows][cols], v[cols] -> result[rows]
+  const rows = M.length, cols = M[0].length;
+  const r = vecZeros(rows);
+  for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) r[i] += M[i][j] * v[j];
+  return r;
+}
+function gelu(x) {
+  // Approximate GELU (matches PyTorch default)
+  return 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x * x * x)));
+}
+function softmax(logits) {
+  const max = Math.max(...logits);
+  const exps = logits.map(x => Math.exp(x - max));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  return exps.map(x => x / sum);
+}
+
+// ── Token Embedding Table ───────────────────────────────────────────
+
+function tokEmbTable() {
+  const table = [];
+  for (let d = 0; d < VOCAB; d++) {
+    const angle = W.tok_arc_start + d * W.tok_arc_stride;
+    table.push([W.tok_arc_A * Math.cos(angle), W.tok_arc_A * Math.sin(angle)]);
+  }
+  return table;
+}
+
+// ── Digit Positions (spiral) ────────────────────────────────────────
+
+function digitPositions() {
+  const pos = [];
+  for (let i = 0; i < MAX_DIGITS; i++) {
+    const angle = 2 * Math.PI * i / MAX_DIGITS + W.spiral_phase;
+    pos.push([
+      W.spiral_amp * Math.cos(angle),
+      W.spiral_amp * Math.sin(angle),
+      W.spiral_slope * i + W.spiral_offset
+    ]);
+  }
+  return pos;
+}
+
+// ── Full position vector for sequence position ──────────────────────
+
+function getPositions(T) {
+  const dp = digitPositions();
+  const special = [W.plus_pos, W.equals_pos, W.eos_pos];
+  const tables = [dp, [W.z_hi_pos], special];
+  const result = [];
+  for (let t = 0; t < T; t++) {
+    const src = POS_MAP.sources[t];
+    const idx = POS_MAP.indices[t];
+    result.push(tables[src][idx].slice());
+  }
+  return result;
+}
+
+// ── RMSNorm ─────────────────────────────────────────────────────────
+
+function rmsNorm(x) {
+  let ss = 0;
+  for (let i = 0; i < D; i++) ss += x[i] * x[i];
+  const rms = Math.sqrt(ss / D + 1e-5);
+  const r = vecZeros(D);
+  for (let i = 0; i < D; i++) r[i] = x[i] / rms * W.norm_weight[i];
+  return r;
+}
+
+// ── Q Phase Rotation ────────────────────────────────────────────────
+
+function applyQPhase(q) {
+  const c = Math.cos(W.q_phase_angle);
+  const s = Math.sin(W.q_phase_angle);
+  const r = vecCopy(q);
+  // Rotate pairs (0,1) and (2,3). Dim 4 untouched.
+  for (let p = 0; p < Math.floor(HEAD_DIM / 2); p++) {
+    const d0 = 2 * p, d1 = 2 * p + 1;
+    r[d0] = q[d0] * c - q[d1] * s;
+    r[d1] = q[d0] * s + q[d1] * c;
+  }
+  return r;
+}
+
+// ── Full Forward Pass (with trace) ──────────────────────────────────
+// Returns { generated: int[], traces: array of per-step info }
+
+function fullInference(aNum, bNum) {
+  const tokTable = tokEmbTable();
+
+  // Encode LSB-first
+  function encodeNum(n) {
+    const d = [];
+    for (let i = 0; i < MAX_DIGITS; i++) { d.push(n % 10); n = Math.floor(n / 10); }
+    return d;
+  }
+  const xDigits = encodeNum(aNum);
+  const yDigits = encodeNum(bNum);
+
+  // Build prompt tokens: X0..X9 + Y0..Y9 = ...
+  const tokens = new Array(SEQ_LEN).fill(0);
+  for (let i = 0; i < 10; i++) tokens[i] = xDigits[i];
+  tokens[10] = 0; // PLUS
+  for (let i = 0; i < 10; i++) tokens[11 + i] = yDigits[i];
+  tokens[21] = 0; // EQUALS
+
+  const traces = [];
+
+  // Autoregressive generation: generate Z_0 .. Z_10, EOS
+  for (let step = 0; step <= ANSWER_LEN; step++) {
+    const T = Z_START + step; // current sequence length
+    const positions = getPositions(T);
+
+    // Build residual stream for all T positions
+    const residuals = [];
+    for (let t = 0; t < T; t++) {
+      const tok2d = tokTable[tokens[t]];
+      const pos3d = positions[t];
+      residuals.push(Float64Array.from([tok2d[0], tok2d[1], pos3d[0], pos3d[1], pos3d[2]]));
+    }
+
+    // We only need the last position's forward pass for generation,
+    // but we need all positions for attention computation.
+
+    // ── Step 1: RMSNorm (pre-attention) ──
+    const normed1 = residuals.map(x => rmsNorm(x));
+
+    // ── Step 2: Extract pos/tok subspaces ──
+    const posH = normed1.map(h => Float64Array.from([h[2], h[3], h[4]]));
+    const tokH = normed1.map(h => Float64Array.from([h[0], h[1]]));
+
+    // ── Step 3: Q, K projections ──
+    const Qs = posH.map(p => applyQPhase(matVec(W.q_proj, p)));
+    const Ks = posH.map(p => matVec(W.q_proj, p));
+
+    // ── Step 4: V projection (tied head_proj) ──
+    // V = tokH @ head_proj_weight  where head_proj is (2,5)
+    // tokH is 2D, head_proj rows are 5D each
+    // V[d] = tokH[0]*head_proj[0][d] + tokH[1]*head_proj[1][d]
+    const Vs = tokH.map(th => {
+      const v = vecZeros(HEAD_DIM);
+      for (let d = 0; d < HEAD_DIM; d++) {
+        v[d] = th[0] * W.head_proj[0][d] + th[1] * W.head_proj[1][d];
+      }
+      return v;
+    });
+
+    // ── Step 5: Attention for last position ──
+    const lastQ = Qs[T - 1];
+    const scale = Math.sqrt(HEAD_DIM);
+    const attnScores = [];
+    for (let t = 0; t < T; t++) {
+      attnScores.push(dot(lastQ, Ks[t]) / scale);
+    }
+    const attnWeights = softmax(attnScores);
+
+    // ── Step 6: Weighted sum of V ──
+    const attnOut = vecZeros(HEAD_DIM);
+    for (let t = 0; t < T; t++) {
+      for (let d = 0; d < HEAD_DIM; d++) {
+        attnOut[d] += attnWeights[t] * Vs[t][d];
+      }
+    }
+
+    // ── Step 7: Rank-1 out_proj ──
+    const scalar = dot(attnOut, Float64Array.from(W.out_proj_A));
+    const outProj = vecZeros(D);
+    for (let d = 0; d < D; d++) outProj[d] = scalar * W.out_proj_B[d];
+
+    // ── Step 8: Residual add ──
+    const afterAttn = vecAdd(residuals[T - 1], outProj);
+
+    // ── Step 9: FFN (pre-norm, GELU, no bias) ──
+    const normed2 = rmsNorm(afterAttn);
+    const hidden = vecZeros(FFN_DIM);
+    for (let f = 0; f < FFN_DIM; f++) {
+      for (let d = 0; d < D; d++) hidden[f] += W.fc1[f][d] * normed2[d];
+      hidden[f] = gelu(hidden[f]);
+    }
+    const ffnOut = vecZeros(D);
+    for (let d = 0; d < D; d++) {
+      for (let f = 0; f < FFN_DIM; f++) ffnOut[d] += W.fc2[d][f] * hidden[f];
+    }
+    const afterFFN = vecAdd(afterAttn, ffnOut);
+
+    // ── Step 10: Output logits ──
+    const normed3 = rmsNorm(afterFFN);
+    const proj2d = vecZeros(TOK_DIM);
+    for (let td = 0; td < TOK_DIM; td++) {
+      for (let d = 0; d < D; d++) proj2d[td] += W.head_proj[td][d] * normed3[d];
+    }
+    const logits = [];
+    for (let v = 0; v < VOCAB; v++) {
+      logits.push(proj2d[0] * tokTable[v][0] + proj2d[1] * tokTable[v][1]);
+    }
+    const probs = softmax(logits);
+    const predicted = logits.indexOf(Math.max(...logits));
+
+    tokens[T] = predicted;
+
+    if (step < ANSWER_LEN) {
+      traces.push({
+        step,
+        seqPos: T,
+        predicted,
+        embedding: vecCopy(residuals[T - 1]),
+        normed1Last: vecCopy(normed1[T - 1]),
+        attnWeights: attnWeights.slice(),
+        attnOut: vecCopy(attnOut),
+        outProj: vecCopy(outProj),
+        afterAttn: vecCopy(afterAttn),
+        normed2: vecCopy(normed2),
+        ffnHidden: vecCopy(hidden),
+        ffnOut: vecCopy(ffnOut),
+        afterFFN: vecCopy(afterFFN),
+        normed3: vecCopy(normed3),
+        proj2d: vecCopy(proj2d),
+        logits: logits.slice(),
+        probs: probs.slice(),
+      });
+    }
+  }
+
+  const generated = [];
+  for (let i = 0; i < ANSWER_LEN; i++) generated.push(tokens[Z_START + i]);
+
+  return { xDigits, yDigits, generated, traces, tokens };
+}
+
+// ── Decode answer ───────────────────────────────────────────────────
+
+function decodeAnswer(digits) {
+  let r = 0;
+  for (let i = 0; i < digits.length; i++) r += digits[i] * Math.pow(10, i);
+  return r;
+}
+
+// ── Global state ────────────────────────────────────────────────────
+
+let lastResult = null;
+
+// ── Run Compute ─────────────────────────────────────────────────────
+
+function runCompute() {
+  const aStr = document.getElementById('inputA').value.replace(/\D/g, '') || '0';
+  const bStr = document.getElementById('inputB').value.replace(/\D/g, '') || '0';
+  const a = parseInt(aStr, 10) || 0;
+  const b = parseInt(bStr, 10) || 0;
+
+  // Clamp to 10 digits
+  const aClamp = Math.min(a, 9999999999);
+  const bClamp = Math.min(b, 9999999999);
+
+  lastResult = fullInference(aClamp, bClamp);
+  animateResult(aClamp, bClamp);
+  updateAllViz();
+}
+
+function randomize() {
+  const digits = Math.floor(Math.random() * 10) + 1;
+  const a = Math.floor(Math.random() * Math.pow(10, digits));
+  const b = Math.floor(Math.random() * Math.pow(10, digits));
+  document.getElementById('inputA').value = a.toString();
+  document.getElementById('inputB').value = b.toString();
+  runCompute();
+}
+
+// ── Animate Result ──────────────────────────────────────────────────
+
+function animateResult(a, b) {
+  const R = lastResult;
+  const container = document.getElementById('resultDisplay');
+  const expected = a + b;
+  const got = decodeAnswer(R.generated);
+  const correct = expected === got;
+
+  // Build sequence display
+  let html = '<div class="seq-labels">';
+  // Labels row
+  for (let i = 0; i < 10; i++) html += `<span style="width:28px;text-align:center">X${i}</span>`;
+  html += '<span style="width:28px;text-align:center">+</span>';
+  for (let i = 0; i < 10; i++) html += `<span style="width:28px;text-align:center">Y${i}</span>`;
+  html += '<span style="width:28px;text-align:center">=</span>';
+  for (let i = 0; i < 11; i++) html += `<span style="width:28px;text-align:center">Z${i}</span>`;
+  html += '</div>';
+
+  html += '<div class="seq-display">';
+  for (let i = 0; i < 10; i++) {
+    html += `<span class="seq-tok x-digit">${R.xDigits[i]}</span>`;
+  }
+  html += '<span class="seq-tok special">+</span>';
+  for (let i = 0; i < 10; i++) {
+    html += `<span class="seq-tok y-digit">${R.yDigits[i]}</span>`;
+  }
+  html += '<span class="seq-tok special">=</span>';
+
+  // Compute carries for coloring
+  const carries = computeCarries(a, b);
+  for (let i = 0; i < 11; i++) {
+    const cls = carries.carryOut[i] ? 'carry' : '';
+    html += `<span class="seq-tok z-digit ${cls}" id="ztok${i}" style="opacity:0">${R.generated[i]}</span>`;
+  }
+  html += '</div>';
+
+  html += `<div style="margin-top:12px;font-size:0.95rem;">`;
+  html += `<span class="mono">${a} + ${b} = <strong style="color:${correct ? '#7ee787' : '#ffa198'}">${got}</strong></span>`;
+  if (correct) html += ' <span style="color:#7ee787">&#10003; Correct</span>';
+  else html += ` <span style="color:#ffa198">&#10007; Expected ${expected}</span>`;
+  html += '</div>';
+
+  container.innerHTML = html;
+
+  // Animate Z digits appearing
+  for (let i = 0; i < 11; i++) {
+    setTimeout(() => {
+      const el = document.getElementById('ztok' + i);
+      if (el) {
+        el.style.opacity = '1';
+        el.classList.add('generating');
+        setTimeout(() => el.classList.remove('generating'), 600);
+      }
+    }, i * 120);
+  }
+}
+
+// ── Carry computation ───────────────────────────────────────────────
+
+function computeCarries(a, b) {
+  const xd = [], yd = [];
+  let aa = a, bb = b;
+  for (let i = 0; i < MAX_DIGITS; i++) { xd.push(aa % 10); aa = Math.floor(aa / 10); }
+  for (let i = 0; i < MAX_DIGITS; i++) { yd.push(bb % 10); bb = Math.floor(bb / 10); }
+
+  const sums = [], carryIn = [], carryOut = [], results = [];
+  let c = 0;
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const x = i < 10 ? xd[i] : 0;
+    const y = i < 10 ? yd[i] : 0;
+    const s = x + y + c;
+    carryIn.push(c);
+    sums.push(x + y);
+    results.push(s % 10);
+    c = s >= 10 ? 1 : 0;
+    carryOut.push(c);
+  }
+  return { xd, yd, sums, carryIn, carryOut, results };
+}
+
+// ── Update all visualizations ───────────────────────────────────────
+
+function updateAllViz() {
+  drawTokenArc();
+  drawTokenY();
+  drawPosSpiral();
+  drawPosNorms();
+  populateAttnSelect();
+  drawAttnRow();
+  populateFwdSelect();
+  drawForwardPass();
+  populateLogitSelect();
+  drawLogits();
+  drawCarryChain();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// VISUALIZATIONS
+// ══════════════════════════════════════════════════════════════════════
+
+const COLORS = {
+  tok: '#79c0ff',
+  tokBg: '#1f6feb33',
+  pos: '#d2a8ff',
+  posBg: '#8957e522',
+  carry: '#ffa198',
+  carryBg: '#da363333',
+  good: '#7ee787',
+  goodBg: '#23863633',
+  accent: '#58a6ff',
+  dim: '#484f58',
+  fg: '#c9d1d9',
+  bg: '#0d1117',
+  panel: '#161b22',
+  border: '#30363d',
+  digits: ['#ff7b72','#ffa657','#d29922','#e3b341','#7ee787','#56d364','#39d353','#58a6ff','#79c0ff','#d2a8ff'],
+};
+
+// ── Token Arc SVG ───────────────────────────────────────────────────
+
+function drawTokenArc() {
+  const svg = document.getElementById('svgTokenArc');
+  const W2 = 380, H = 380, cx = W2 / 2, cy = H / 2;
+  const table = tokEmbTable();
+  const tooltip = document.getElementById('tokTooltip');
+
+  // Scale factor: table values are ~13 radius, we want ~140px
+  const scale = 10;
+
+  let html = '';
+
+  // Draw background circle (faint reference)
+  const r = W.tok_arc_A * scale;
+  html += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${COLORS.border}" stroke-width="1" stroke-dasharray="4,4"/>`;
+
+  // Draw arc
+  html += '<path d="';
+  for (let d = 0; d <= 9; d++) {
+    const x = cx + table[d][0] * scale;
+    const y = cy - table[d][1] * scale; // flip y
+    html += (d === 0 ? 'M' : 'L') + ` ${x.toFixed(1)} ${y.toFixed(1)}`;
+  }
+  html += `" fill="none" stroke="${COLORS.tok}" stroke-width="2" opacity="0.5"/>`;
+
+  // Highlight current input digits if available
+  const activeDigits = new Set();
+  if (lastResult) {
+    lastResult.xDigits.forEach(d => activeDigits.add(d));
+    lastResult.yDigits.forEach(d => activeDigits.add(d));
+  }
+
+  // Draw digit points
+  for (let d = 0; d < VOCAB; d++) {
+    const x = cx + table[d][0] * scale;
+    const y = cy - table[d][1] * scale;
+    const active = activeDigits.has(d);
+    const radius = active ? 14 : 10;
+    const fill = active ? COLORS.tok : COLORS.panel;
+    const stroke = active ? COLORS.accent : COLORS.tok;
+    const sw = active ? 2.5 : 1.5;
+
+    html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" class="tok-dot" data-digit="${d}" style="cursor:pointer"/>`;
+    html += `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" fill="${COLORS.fg}" font-size="11" font-weight="700" font-family="monospace" pointer-events="none">${d}</text>`;
+  }
+
+  // Axes
+  html += `<line x1="${cx - 160}" y1="${cy}" x2="${cx + 160}" y2="${cy}" stroke="${COLORS.dim}" stroke-width="0.5"/>`;
+  html += `<line x1="${cx}" y1="${cy - 160}" x2="${cx}" y2="${cy + 160}" stroke="${COLORS.dim}" stroke-width="0.5"/>`;
+  html += `<text x="${cx + 162}" y="${cy + 4}" fill="${COLORS.dim}" font-size="10">x</text>`;
+  html += `<text x="${cx + 4}" y="${cy - 162}" fill="${COLORS.dim}" font-size="10">y</text>`;
+
+  svg.innerHTML = html;
+
+  // Tooltip handlers
+  svg.querySelectorAll('.tok-dot').forEach(el => {
+    el.addEventListener('mouseenter', (e) => {
+      const d = parseInt(el.dataset.digit);
+      const emb = table[d];
+      const angle = W.tok_arc_start + d * W.tok_arc_stride;
+      tooltip.innerHTML = `<strong>Digit ${d}</strong><br>x = ${emb[0].toFixed(3)}<br>y = ${emb[1].toFixed(3)}<br>angle = ${(angle * 180 / Math.PI).toFixed(1)}&deg;`;
+      tooltip.style.display = 'block';
+      const rect = svg.parentElement.getBoundingClientRect();
+      tooltip.style.left = (e.clientX - rect.left + 10) + 'px';
+      tooltip.style.top = (e.clientY - rect.top - 40) + 'px';
+    });
+    el.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+  });
+}
+
+// ── Token Y-coordinate chart ────────────────────────────────────────
+
+function drawTokenY() {
+  const svg = document.getElementById('svgTokenY');
+  const W2 = 380, H = 280;
+  const table = tokEmbTable();
+  const pad = { left: 50, right: 20, top: 20, bottom: 40 };
+  const pw = W2 - pad.left - pad.right, ph = H - pad.top - pad.bottom;
+
+  const yVals = table.map(t => t[1]);
+  const yMin = Math.min(...yVals) - 1, yMax = Math.max(...yVals) + 1;
+
+  function sx(d) { return pad.left + d / 9 * pw; }
+  function sy(v) { return pad.top + (1 - (v - yMin) / (yMax - yMin)) * ph; }
+
+  let html = '';
+
+  // Grid lines
+  for (let d = 0; d < 10; d++) {
+    const x = sx(d);
+    html += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${H - pad.bottom}" stroke="${COLORS.dim}" stroke-width="0.3"/>`;
+    html += `<text x="${x}" y="${H - pad.bottom + 16}" text-anchor="middle" fill="${COLORS.dim}" font-size="11" font-family="monospace">${d}</text>`;
+  }
+  // Y axis ticks
+  for (let v = Math.ceil(yMin); v <= Math.floor(yMax); v += 2) {
+    const y = sy(v);
+    html += `<line x1="${pad.left}" y1="${y}" x2="${W2 - pad.right}" y2="${y}" stroke="${COLORS.dim}" stroke-width="0.3"/>`;
+    html += `<text x="${pad.left - 8}" y="${y + 3}" text-anchor="end" fill="${COLORS.dim}" font-size="10">${v}</text>`;
+  }
+
+  // Line connecting points
+  html += '<path d="';
+  for (let d = 0; d < 10; d++) {
+    html += (d === 0 ? 'M' : 'L') + ` ${sx(d).toFixed(1)} ${sy(yVals[d]).toFixed(1)}`;
+  }
+  html += `" fill="none" stroke="${COLORS.tok}" stroke-width="2"/>`;
+
+  // Points
+  const activeDigits = new Set();
+  if (lastResult) {
+    lastResult.xDigits.forEach(d => activeDigits.add(d));
+    lastResult.yDigits.forEach(d => activeDigits.add(d));
+  }
+  for (let d = 0; d < 10; d++) {
+    const active = activeDigits.has(d);
+    html += `<circle cx="${sx(d).toFixed(1)}" cy="${sy(yVals[d]).toFixed(1)}" r="${active ? 6 : 4}" fill="${active ? COLORS.tok : COLORS.panel}" stroke="${COLORS.tok}" stroke-width="${active ? 2 : 1.5}"/>`;
+  }
+
+  // Axis labels
+  html += `<text x="${W2 / 2}" y="${H - 4}" text-anchor="middle" fill="${COLORS.dim}" font-size="11">Digit Value</text>`;
+  html += `<text x="14" y="${H / 2}" text-anchor="middle" fill="${COLORS.dim}" font-size="11" transform="rotate(-90,14,${H/2})">Y Coordinate</text>`;
+
+  svg.innerHTML = html;
+}
+
+// ── Position Spiral ─────────────────────────────────────────────────
+
+function drawPosSpiral() {
+  const svg = document.getElementById('svgPosSpiral');
+  const W2 = 380, H = 340, cx = W2 / 2, cy = H / 2;
+  const dp = digitPositions();
+  const scale = 36;
+
+  let html = '';
+
+  // Reference circle
+  const r = W.spiral_amp * scale;
+  html += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${COLORS.border}" stroke-width="1" stroke-dasharray="3,3"/>`;
+
+  // Connect spiral
+  html += '<path d="';
+  for (let i = 0; i < 10; i++) {
+    const x = cx + dp[i][0] * scale;
+    const y = cy - dp[i][1] * scale;
+    html += (i === 0 ? 'M' : 'L') + ` ${x.toFixed(1)} ${y.toFixed(1)}`;
+  }
+  html += `Z" fill="none" stroke="${COLORS.pos}" stroke-width="1.5" opacity="0.5"/>`;
+
+  // Points
+  for (let i = 0; i < 10; i++) {
+    const x = cx + dp[i][0] * scale;
+    const y = cy - dp[i][1] * scale;
+    html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="12" fill="${COLORS.panel}" stroke="${COLORS.pos}" stroke-width="1.5"/>`;
+    html += `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" fill="${COLORS.pos}" font-size="10" font-weight="600" font-family="monospace">${i}</text>`;
+  }
+
+  // Special positions
+  const specials = [
+    { name: '=', pos: W.equals_pos, color: '#8b949e' },
+  ];
+  for (const sp of specials) {
+    if (vecNorm(Float64Array.from(sp.pos)) > 0.01) {
+      const x = cx + sp.pos[0] * scale;
+      const y = cy - sp.pos[1] * scale;
+      html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10" fill="${COLORS.panel}" stroke="${sp.color}" stroke-width="1.5" stroke-dasharray="3,2"/>`;
+      html += `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" fill="${sp.color}" font-size="11" font-weight="600">${sp.name}</text>`;
+    }
+  }
+
+  // Origin
+  html += `<circle cx="${cx}" cy="${cy}" r="2" fill="${COLORS.dim}"/>`;
+
+  // Axes
+  html += `<line x1="${cx - 160}" y1="${cy}" x2="${cx + 160}" y2="${cy}" stroke="${COLORS.dim}" stroke-width="0.5"/>`;
+  html += `<line x1="${cx}" y1="${cy - 150}" x2="${cx}" y2="${cy + 150}" stroke="${COLORS.dim}" stroke-width="0.5"/>`;
+  html += `<text x="${cx + 162}" y="${cy + 4}" fill="${COLORS.dim}" font-size="10">dim0</text>`;
+  html += `<text x="${cx + 6}" y="${cy - 152}" fill="${COLORS.dim}" font-size="10">dim1</text>`;
+
+  // Legend
+  html += `<text x="10" y="20" fill="${COLORS.dim}" font-size="10">Positions are shared: X[i], Y[i], Z[i] use the same position[i]</text>`;
+
+  svg.innerHTML = html;
+}
+
+// ── Position Norms ──────────────────────────────────────────────────
+
+function drawPosNorms() {
+  const svg = document.getElementById('svgPosNorms');
+  const W2 = 380, H = 280;
+  const pad = { left: 50, right: 20, top: 20, bottom: 50 };
+  const pw = W2 - pad.left - pad.right, ph = H - pad.top - pad.bottom;
+
+  const dp = digitPositions();
+  const items = [];
+  for (let i = 0; i < 10; i++) {
+    items.push({ label: `d${i}`, norm: vecNorm(Float64Array.from(dp[i])), color: COLORS.pos });
+  }
+  items.push({ label: 'z_hi', norm: vecNorm(Float64Array.from(W.z_hi_pos)), color: COLORS.carry });
+  items.push({ label: '=', norm: vecNorm(Float64Array.from(W.equals_pos)), color: '#8b949e' });
+
+  const maxNorm = Math.max(...items.map(x => x.norm));
+  const barW = pw / items.length * 0.7;
+  const gap = pw / items.length;
+
+  let html = '';
+
+  // Grid
+  for (let v = 0; v <= maxNorm; v += 10) {
+    const y = pad.top + (1 - v / maxNorm) * ph;
+    html += `<line x1="${pad.left}" y1="${y}" x2="${W2 - pad.right}" y2="${y}" stroke="${COLORS.dim}" stroke-width="0.3"/>`;
+    html += `<text x="${pad.left - 6}" y="${y + 3}" text-anchor="end" fill="${COLORS.dim}" font-size="9">${v.toFixed(0)}</text>`;
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const x = pad.left + i * gap + (gap - barW) / 2;
+    const h = (items[i].norm / maxNorm) * ph;
+    const y = pad.top + ph - h;
+    html += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${items[i].color}" opacity="0.6" rx="2"/>`;
+    html += `<text x="${(x + barW / 2).toFixed(1)}" y="${H - pad.bottom + 14}" text-anchor="middle" fill="${COLORS.dim}" font-size="9" font-family="monospace">${items[i].label}</text>`;
+    html += `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 4).toFixed(1)}" text-anchor="middle" fill="${COLORS.fg}" font-size="8">${items[i].norm.toFixed(1)}</text>`;
+  }
+
+  html += `<text x="${W2 / 2}" y="${H - 6}" text-anchor="middle" fill="${COLORS.dim}" font-size="11">Position vector norms</text>`;
+
+  svg.innerHTML = html;
+}
+
+// ── Attention Visualization ─────────────────────────────────────────
+
+function populateAttnSelect() {
+  const sel = document.getElementById('attnPosSelect');
+  sel.innerHTML = '';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = `Z[${i}] (position ${Z_START + i})`;
+    sel.appendChild(opt);
+  }
+}
+
+function drawAttnRow() {
+  if (!lastResult) return;
+  const step = parseInt(document.getElementById('attnPosSelect').value) || 0;
+  const trace = lastResult.traces[step];
+  if (!trace) return;
+
+  const svg = document.getElementById('svgAttn');
+  const aw = trace.attnWeights;
+  const T = aw.length;
+
+  const W2 = 860, H = 200;
+  const pad = { left: 10, right: 10, top: 30, bottom: 60 };
+  const pw = W2 - pad.left - pad.right;
+  const barW = Math.min(pw / T * 0.85, 20);
+  const gap = pw / T;
+
+  const maxW = Math.max(...aw);
+
+  let html = '';
+
+  // Bars
+  for (let t = 0; t < T; t++) {
+    const x = pad.left + t * gap + (gap - barW) / 2;
+    const h = (aw[t] / maxW) * (H - pad.top - pad.bottom);
+    const y = H - pad.bottom - h;
+
+    let color = COLORS.dim;
+    let label = '';
+    if (t < 10) { color = COLORS.tok; label = `X${t}`; }
+    else if (t === 10) { color = '#8b949e'; label = '+'; }
+    else if (t < 21) { color = COLORS.carry; label = `Y${t-11}`; }
+    else if (t === 21) { color = '#8b949e'; label = '='; }
+    else { color = COLORS.good; label = `Z${t-22}`; }
+
+    const opacity = aw[t] > 0.01 ? 0.8 : 0.2;
+    html += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(h, 0.5).toFixed(1)}" fill="${color}" opacity="${opacity}" rx="1"/>`;
+
+    if (aw[t] > 0.03) {
+      html += `<text x="${(x + barW/2).toFixed(1)}" y="${(y - 3).toFixed(1)}" text-anchor="middle" fill="${COLORS.fg}" font-size="8">${(aw[t]*100).toFixed(0)}%</text>`;
+    }
+    // Label every position if not too crowded, else every other
+    if (T <= 34) {
+      html += `<text x="${(x + barW/2).toFixed(1)}" y="${H - pad.bottom + 12}" text-anchor="middle" fill="${COLORS.dim}" font-size="7" font-family="monospace" transform="rotate(-45,${(x+barW/2).toFixed(1)},${H - pad.bottom + 12})">${label}</text>`;
+    }
+  }
+
+  // Title
+  html += `<text x="${W2/2}" y="18" text-anchor="middle" fill="${COLORS.fg}" font-size="12">Attention weights for Z[${step}] (position ${Z_START + step})</text>`;
+
+  svg.innerHTML = html;
+
+  // Find top 3 attended positions
+  const sorted = aw.map((w, i) => ({w, i})).sort((a, b) => b.w - a.w).slice(0, 3);
+  const info = sorted.map(s => {
+    let name;
+    if (s.i < 10) name = `X[${s.i}]`;
+    else if (s.i === 10) name = 'PLUS';
+    else if (s.i < 21) name = `Y[${s.i - 11}]`;
+    else if (s.i === 21) name = 'EQUALS';
+    else name = `Z[${s.i - 22}]`;
+    return `${name}: ${(s.w * 100).toFixed(1)}%`;
+  }).join(', ');
+  document.getElementById('attnInfo').textContent = 'Top: ' + info;
+
+  // Insight
+  const insightEl = document.getElementById('attnInsight');
+  if (step < 10) {
+    const xi = step + 1 < 10 ? step + 1 : step;
+    insightEl.innerHTML = `<strong>Lookahead pattern:</strong> Z[${step}] primarily attends to X[${xi}] and Y[${xi}], looking ahead one position to gather the next column's digits for carry computation. This is position-only attention (content-independent).`;
+  } else {
+    insightEl.innerHTML = `<strong>Carry position:</strong> Z[10] is the carry-out digit. It attends to positions that encode the highest-order carry information.`;
+  }
+}
+
+// ── Forward Pass Visualization ──────────────────────────────────────
+
+function populateFwdSelect() {
+  const sel = document.getElementById('fwdStepSelect');
+  sel.innerHTML = '';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const opt = document.createElement('option');
+    opt.value = i;
+    const digit = lastResult ? lastResult.generated[i] : '?';
+    opt.textContent = `Z[${i}] = ${digit}`;
+    sel.appendChild(opt);
+  }
+}
+
+function drawForwardPass() {
+  if (!lastResult) return;
+  const step = parseInt(document.getElementById('fwdStepSelect').value) || 0;
+  const trace = lastResult.traces[step];
+  if (!trace) return;
+
+  const container = document.getElementById('fwdStages');
+  const dimNames = ['tok0', 'tok1', 'pos0', 'pos1', 'pos2'];
+  const dimColors = [COLORS.tok, COLORS.tok, COLORS.pos, COLORS.pos, COLORS.pos];
+
+  function makeBarChart(values, label, colors) {
+    const maxAbs = Math.max(...values.map(Math.abs), 0.001);
+    let html = `<div class="bar-chart">`;
+    for (let i = 0; i < values.length; i++) {
+      const h = Math.abs(values[i]) / maxAbs * 60;
+      const c = colors ? colors[i] : COLORS.accent;
+      const isNeg = values[i] < 0;
+      html += `<div class="bar-wrapper">`;
+      html += `<div class="bar-val">${values[i].toFixed(2)}</div>`;
+      html += `<div class="bar" style="height:${h.toFixed(0)}px;background:${c};opacity:${isNeg ? 0.5 : 0.8}"></div>`;
+      html += `<div class="bar-label">${label ? label[i] : i}</div>`;
+      html += `</div>`;
+    }
+    html += '</div>';
+    return html;
+  }
+
+  let html = '';
+
+  // Stage 1: Embedding
+  html += '<div class="step-stage">';
+  html += '<h4>1. Token + Position Embedding</h4>';
+  html += `<div class="stage-info">Token (2D) | Position (3D) = 5D residual vector</div>`;
+  html += makeBarChart(Array.from(trace.embedding), dimNames, dimColors);
+  html += '</div>';
+
+  // Stage 2: After attention
+  html += '<div class="step-stage">';
+  html += '<h4>2. After Attention + Rank-1 Output Projection</h4>';
+  html += `<div class="stage-info">Attention gathers V from attended positions, then rank-1 projects back to residual (mainly writes dim1)</div>`;
+  html += makeBarChart(Array.from(trace.afterAttn), dimNames, dimColors);
+  html += `<div class="stage-info" style="margin-top:8px;">Out_proj contribution: [${Array.from(trace.outProj).map(v => v.toFixed(3)).join(', ')}]</div>`;
+  html += '</div>';
+
+  // Stage 3: FFN
+  html += '<div class="step-stage">';
+  html += '<h4>3. FFN (Carry Detection)</h4>';
+  html += `<div class="stage-info">Two GELU hidden units. Unit 0 = "carry detector", Unit 1 = "no-carry detector".</div>`;
+  html += `<div style="display:flex;gap:24px;flex-wrap:wrap;">`;
+  html += `<div><strong style="font-size:0.8rem;color:${COLORS.carry}">Hidden unit 0:</strong> <span class="mono">${trace.ffnHidden[0].toFixed(4)}</span> ${trace.ffnHidden[0] > 0.1 ? '(active)' : '(inactive)'}</div>`;
+  html += `<div><strong style="font-size:0.8rem;color:${COLORS.good}">Hidden unit 1:</strong> <span class="mono">${trace.ffnHidden[1].toFixed(4)}</span> ${trace.ffnHidden[1] > 0.1 ? '(active)' : '(inactive)'}</div>`;
+  html += '</div>';
+  html += `<div class="stage-info" style="margin-top:8px;">After FFN residual:</div>`;
+  html += makeBarChart(Array.from(trace.afterFFN), dimNames, dimColors);
+  html += '</div>';
+
+  // Stage 4: Output
+  html += '<div class="step-stage">';
+  html += '<h4>4. Output Head (2D Projection)</h4>';
+  html += `<div class="stage-info">head_proj maps 5D &rarr; 2D, then dot product with each digit embedding gives 10 logits.</div>`;
+  html += `<div class="stage-info">2D projection: [${trace.proj2d[0].toFixed(3)}, ${trace.proj2d[1].toFixed(3)}]</div>`;
+
+  // Logit bars
+  const maxLogit = Math.max(...trace.logits);
+  html += '<div class="logits-chart">';
+  for (let v = 0; v < VOCAB; v++) {
+    const prob = trace.probs[v];
+    const h = Math.max(prob * 90, 1);
+    const isWinner = v === trace.predicted;
+    html += `<div class="logit-bar-wrap">`;
+    html += `<div class="logit-bar ${isWinner ? 'winner' : ''}" style="height:${h.toFixed(0)}px;background:${isWinner ? COLORS.good : COLORS.dim}"></div>`;
+    html += `<div class="logit-label">${v}</div>`;
+    html += '</div>';
+  }
+  html += '</div>';
+  html += `<div class="stage-info" style="margin-top:8px;"><strong style="color:${COLORS.good}">Predicted: ${trace.predicted}</strong> (probability: ${(trace.probs[trace.predicted] * 100).toFixed(1)}%)</div>`;
+  html += '</div>';
+
+  container.innerHTML = html;
+
+  document.getElementById('fwdStepInfo').textContent = `Generating position ${trace.seqPos}, output = ${trace.predicted}`;
+}
+
+// ── Logits Visualization ────────────────────────────────────────────
+
+function populateLogitSelect() {
+  const sel = document.getElementById('logitStepSelect');
+  sel.innerHTML = '';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const opt = document.createElement('option');
+    opt.value = i;
+    const digit = lastResult ? lastResult.generated[i] : '?';
+    opt.textContent = `Z[${i}] = ${digit}`;
+    sel.appendChild(opt);
+  }
+}
+
+function drawLogits() {
+  if (!lastResult) return;
+  const step = parseInt(document.getElementById('logitStepSelect').value) || 0;
+  const trace = lastResult.traces[step];
+  if (!trace) return;
+
+  const container = document.getElementById('logitsContainer');
+  const table = tokEmbTable();
+
+  // Draw 2D projection space with digit embeddings and the query point
+  let html = '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;">';
+
+  // Left: 2D scatter of token embeddings + projection
+  html += '<div>';
+  html += '<svg width="280" height="280" id="svgLogitSpace">';
+
+  const scale = 9;
+  const cx = 140, cy = 140;
+
+  // Faint reference circle
+  html += `<circle cx="${cx}" cy="${cy}" r="${W.tok_arc_A * scale}" fill="none" stroke="${COLORS.border}" stroke-width="0.5"/>`;
+
+  // Token embeddings
+  for (let d = 0; d < VOCAB; d++) {
+    const x = cx + table[d][0] * scale;
+    const y = cy - table[d][1] * scale;
+    const isWinner = d === trace.predicted;
+    html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${isWinner ? 10 : 6}" fill="${isWinner ? COLORS.good + '66' : COLORS.panel}" stroke="${isWinner ? COLORS.good : COLORS.tok}" stroke-width="${isWinner ? 2 : 1}"/>`;
+    html += `<text x="${x.toFixed(1)}" y="${(y + 3).toFixed(1)}" text-anchor="middle" fill="${COLORS.fg}" font-size="9" font-family="monospace" font-weight="${isWinner ? '700' : '400'}">${d}</text>`;
+  }
+
+  // The 2D projection point (query)
+  const qx = cx + trace.proj2d[0] * scale;
+  const qy = cy - trace.proj2d[1] * scale;
+  // Clamp to view
+  const qxc = Math.max(10, Math.min(270, qx));
+  const qyc = Math.max(10, Math.min(270, qy));
+
+  // Line from origin to query direction (logits = dot product, so direction matters)
+  const qNorm = Math.sqrt(trace.proj2d[0]**2 + trace.proj2d[1]**2);
+  if (qNorm > 0.01) {
+    const dirX = trace.proj2d[0] / qNorm * 130;
+    const dirY = trace.proj2d[1] / qNorm * 130;
+    html += `<line x1="${cx}" y1="${cy}" x2="${(cx + dirX * scale / 10).toFixed(1)}" y2="${(cy - dirY * scale / 10).toFixed(1)}" stroke="${COLORS.accent}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  }
+
+  html += `<circle cx="${qxc.toFixed(1)}" cy="${qyc.toFixed(1)}" r="5" fill="${COLORS.accent}" stroke="#fff" stroke-width="1.5"/>`;
+  html += `<text x="${qxc.toFixed(1)}" y="${(qyc - 8).toFixed(1)}" text-anchor="middle" fill="${COLORS.accent}" font-size="9" font-weight="600">proj</text>`;
+
+  html += '</svg>';
+  html += '</div>';
+
+  // Right: probability bars
+  html += '<div style="flex:1;min-width:200px;">';
+  html += '<div style="font-size:0.85rem;color:#f0f6fc;margin-bottom:8px;font-weight:600;">Softmax Probabilities</div>';
+  for (let v = 0; v < VOCAB; v++) {
+    const prob = trace.probs[v];
+    const isWinner = v === trace.predicted;
+    const barW = prob * 200;
+    html += `<div style="display:flex;align-items:center;gap:6px;margin:3px 0;">`;
+    html += `<span class="mono" style="width:16px;text-align:right;font-size:0.8rem;color:${isWinner ? COLORS.good : COLORS.dim}">${v}</span>`;
+    html += `<div style="width:${barW.toFixed(0)}px;height:14px;background:${isWinner ? COLORS.good : COLORS.dim};border-radius:2px;opacity:0.7;min-width:1px;"></div>`;
+    html += `<span style="font-size:0.72rem;color:${COLORS.fg}">${(prob*100).toFixed(1)}%</span>`;
+    html += '</div>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// ── Carry Chain ─────────────────────────────────────────────────────
+
+function drawCarryChain() {
+  if (!lastResult) return;
+  const container = document.getElementById('carryChain');
+  const aStr = document.getElementById('inputA').value.replace(/\D/g, '') || '0';
+  const bStr = document.getElementById('inputB').value.replace(/\D/g, '') || '0';
+  const a = parseInt(aStr, 10) || 0;
+  const b = parseInt(bStr, 10) || 0;
+
+  const carries = computeCarries(a, b);
+
+  let html = '';
+
+  // Header row: X digits
+  html += '<div style="text-align:center;margin-bottom:4px;">';
+  html += '<div class="carry-chain">';
+  for (let i = 0; i < 11; i++) {
+    html += '<div class="carry-cell">';
+    html += `<div class="pos-label" style="margin-bottom:2px">pos ${i}</div>`;
+    html += `<div class="digit-sum" style="color:${COLORS.tok}">${i < 10 ? carries.xd[i] : ' '}</div>`;
+    html += `<div class="digit-sum" style="color:${COLORS.carry}">${i < 10 ? carries.yd[i] : ' '}</div>`;
+    html += `<div class="digit-sum" style="color:${COLORS.dim};border-top:1px solid ${COLORS.dim};margin-top:2px;padding-top:2px;">${carries.sums[i]}${carries.carryIn[i] ? '+1' : ''}</div>`;
+    html += `<div class="carry-arrow" style="color:${carries.carryOut[i] ? COLORS.carry : COLORS.good}">${carries.carryOut[i] ? 'carry=1' : ''}&nbsp;</div>`;
+    html += `<div class="result-digit ${carries.carryOut[i] ? 'has-carry' : 'no-carry'}">${lastResult.generated[i]}</div>`;
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '</div>';
+
+  // Legend
+  html += '<div style="display:flex;gap:16px;justify-content:center;margin-top:12px;font-size:0.78rem;">';
+  html += `<span><span style="color:${COLORS.tok}">X digit</span></span>`;
+  html += `<span><span style="color:${COLORS.carry}">Y digit</span></span>`;
+  html += `<span><span style="display:inline-block;width:10px;height:10px;background:${COLORS.goodBg};border:1px solid ${COLORS.good};border-radius:2px;vertical-align:middle;"></span> No carry</span>`;
+  html += `<span><span style="display:inline-block;width:10px;height:10px;background:${COLORS.carryBg};border:1px solid ${COLORS.carry};border-radius:2px;vertical-align:middle;"></span> Carry</span>`;
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
+// ── Initialize ──────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', () => {
+  runCompute();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+{
+  "model": {
+    "d_model": 5,
+    "tok_dim": 2,
+    "pos_dim": 3,
+    "n_heads": 1,
+    "head_dim": 5,
+    "n_layers": 1,
+    "ffn_dim": 2,
+    "ffn_bias": false,
+    "vocab_size": 10,
+    "tok_emb_mode": "parametric",
+    "tie_tok_arc_ab": true,
+    "pos_mode": "spiral",
+    "pos_correction_mode": "none",
+    "freeze_special": "plus_eos",
+    "tie_qk": true,
+    "q_phase": true,
+    "tie_vo": true,
+    "attn_out_rank": 1,
+    "norm_mode": "shared"
+  },
+  "training": {
+    "seed": 45214,
+    "steps": 120000,
+    "batch_size": 256,
+    "lr": 0.02,
+    "min_lr_ratio": 0.1,
+    "warmup_steps": 1000,
+    "weight_decay": 0.01,
+    "wd_adaptive": true,
+    "wd_drop_exact": 0.02,
+    "wd_drop_exact_final": 0.2,
+    "wd_drop_tok_acc": 0.7,
+    "wd_drop_factor": 0.1,
+    "grad_clip": 1.0,
+    "carry_mix": 0.8,
+    "carry_mix_fade_start": 10000,
+    "carry_mix_fade_end": 80000,
+    "curriculum": "1-3:2000,1-6:5000,1-10:rest"
+  },
+  "result": {
+    "params": 74,
+    "accuracy": "10010/10010 (100%)",
+    "grokked_step": 42000,
+    "seeds_tested": [45214, 71046, 78988],
+    "seeds_grokked": [45214, 71046, 78988]
+  }
+}
