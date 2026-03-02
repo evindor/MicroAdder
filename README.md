@@ -2,6 +2,8 @@
 
 A **67-parameter** trained transformer that performs 10-digit addition with 100% accuracy. Built for the [AdderBoard](https://github.com/anadim/AdderBoard) challenge.
 
+[Interactive model](https://evindor.github.io/MicroAdder/) | [Paper](https://evindor.github.io/MicroAdder/PAPER) (not a real scientific paper, its a weekend project)
+
 ## Result
 
 **67 parameters, 100% accuracy** (10,010/10,010). Trained from scratch — no warm-starting, no frozen pretrained values. Sinusoidal positional encoding (0 learned position parameters).
