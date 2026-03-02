@@ -65,6 +65,16 @@ TOTAL             74
 
 Note: Fixed/sinusoidal positional encodings are not counted per the parameter counting rules. All 74 parameters above are learned.
 
+### Near-Grok Results: 70p and 72p
+
+**70p (sinusoidal positions):** All 4 spiral params frozen to their init values, making digit positions a textbook sinusoidal encoding: `[cos(2πi/10), sin(2πi/10), 0]`. These are free by competition rules. Seed 90494 reached **73.5% exact, 97.5% tok_acc** but plateaued — oscillating in the 58-73% exact range for 100K+ steps without ever reaching 100%. This is a qualitatively different regime: the model finds the carry circuit but can't stabilize it.
+
+**72p (frozen spiral slope+amp):** slope=0, amp=1 frozen as buffers. Seed 70472 reached **72.7% exact, 97.6% tok_acc** in 120K steps. Seed 80085 reached 70.9% exact when killed at 110K. Both show the same plateau pattern as 70p.
+
+**Interpretation:** The "near-grok plateau" at ~72% exact / 97.5% tok_acc is a new phenomenon not seen at 74p. At 74p, seeds either fully grok (100%) or fail completely (<1%). At 70-72p, seeds reach a stable intermediate state where the carry circuit partially works — the model handles most carries but a subset (likely long carry chains or specific digit combinations) oscillate. This suggests either (a) the model needs more training time or lower LR to push through, or (b) 70-72p is at a representational boundary where the carry circuit is barely expressible.
+
+**Significance:** These runs use the new high carry-mix recipe (cm=0.8, step-fade) which was transformative at 74p. The fact that even this recipe can't push 70p to 100% suggests a genuine capacity/representation constraint, not just an optimization difficulty.
+
 ### Previous From-Scratch Best: 170p Parameter Budget
 
 ```
@@ -149,36 +159,34 @@ These models all train from random initialization with no warm-starting. Every p
  |    Delimiter positions frozen at zero
  |
  74p  Tie tok_arc A=B (-1p)
-      Circular embedding (trained A/B ratio was 1.005)
-      High carry-mix training: 3/3 random seeds grok
-      THIS IS THE CURRENT FROM-SCRATCH FRONTIER
+ |    Circular embedding (trained A/B ratio was 1.005)
+ |    High carry-mix training: 3/3 random seeds grok
+ |    THIS IS THE CURRENT FROM-SCRATCH FRONTIER (100% accuracy)
+ |
+ 72p  Freeze spiral slope+amp (-2p)
+ |    slope converged to -0.058 (≈0), amp to 1.005 (≈1)
+ |    Near-grok: s70472 72.7%, s80085 70.9% exact (NOT 100%)
+ |
+ 70p  Freeze ALL spiral params — sinusoidal positions (-4p from 74p)
+      Digit pos = [cos(2πi/10), sin(2πi/10), 0] — FREE by competition rules
+      Near-grok: s90494 73.5% exact, 97.5% tok_acc (NOT 100%)
+      Plateau at ~72% for 100K+ steps — carry circuit partially works
+
+ Frontier target (in progress):
+ 62p  Toeplitz q_proj + sinusoidal positions (-12p from 74p)
+      q_proj: 15p → 7p (constrained to constant diagonals)
+      Running experiments, results pending
 ```
 
-### Warm-Start Exploration: 75p → 62p
+### Warm-Start Exploration: 75p → 62p (Historical — Abandoned Approach)
 
-**Disclaimer:** These models rely on warm-starting from a parent checkpoint. Frozen parameters retain values learned during the parent's training, meaning the effective knowledge in the model exceeds the learnable parameter count. These results demonstrate what the architecture can *represent* but not what SGD can *discover* from scratch.
+**Disclaimer:** These models relied on warm-starting from parent checkpoints — frozen parameters retained learned values. This approach has been abandoned in favor of from-scratch training with architectural innovations (sinusoidal positions, structured projections). Listed here for completeness only.
 
 ```
- 72p  Freeze z_hi carry position (-3p from 75p)
- |    Warm-started from 75p. Also groks from scratch with s80085.
- |    72p is the LOWEST confirmed from-scratch model.
- |
- 70p  Freeze spiral_offset + spiral_phase (-2p)
- |    Warm-started from 72p. Fails from scratch even with s80085.
- |
- 66p  Freeze all spiral + tok_arc start+stride (-4p)
- |    Warm-started from 70p; 0 spiral params learned
- |
- 65p  Tie tok_arc_A = tok_arc_B (-1p)
- |    Circular arc (A/B ratio was 0.993, nearly identical)
- |
- 63p  Freeze EQUALS position (-3p from 66p)
- |    Warm-start loads trained values into buffer
- |
- 62p  Tie A=B + freeze EQUALS (-4p from 66p)
-      Combined approach: 62 learnable parameters
-      Warm-started from 66p, grokked at ~96K steps
-      All positions + embeddings frozen to warm-start values
+ 72p  Freeze z_hi carry position (warm-start from 75p)
+ 70p  Freeze spiral_offset + spiral_phase (warm-start from 72p)
+ 66p  Freeze all spiral + tok_arc start+stride (warm-start from 70p)
+ 62p  Tie A=B + freeze EQUALS + all positions (warm-start from 66p)
 ```
 
 ### Key Techniques (Our Contributions)
@@ -212,10 +220,9 @@ These models all train from random initialization with no warm-starting. Every p
 | Freeze PLUS+EOS to zero (75p from scratch) | 75p | 100% | PLUS/EOS positions are zero; only EQUALS and z_hi need learning |
 | Tie tok_arc A=B (circular embedding) | 74p | 100% | Trained A/B ratio was 1.005; tying saves 1p with no risk |
 | High carry-mix (0.8) + step-based fade | 74p | 100%, 3/3 seeds | Carry-heavy training + smooth fade dramatically improves grok rate |
-| Warm-start cascade (75p→72p→...→62p) | 62p | 100% | Incremental freezing bypasses optimization barriers (not from-scratch) |
-| Tie tok_arc A=B (circular arc, warm-start) | 65p | 100% | Converges to A/B ratio 0.993 anyway |
-| Freeze EQUALS position (warm-start) | 63p | 100% | Warm-start preserves trained values in buffers |
-| Freeze all positions + embeddings + tie A=B (warm-start) | 62p | 100% | Only 1 embedding param needed (arc amplitude) |
+| Freeze spiral slope+amp (72p) | 72p | 72.7% best (near-grok) | slope≈0, amp≈1 already; freezing doesn't break learning but makes full grok harder |
+| Sinusoidal positions (70p) | 70p | 73.5% best (near-grok) | ALL spiral frozen = free sinusoidal encoding. Model finds carry circuit but can't fully stabilize |
+| Toeplitz q_proj (implemented) | 62p | Running | Constant-diagonal constraint: 15p → 7p. Equivalent to 1D convolution over position dims |
 
 ### What Failed
 
@@ -242,6 +249,9 @@ These models all train from random initialization with no warm-starting. Every p
 | Scheduled WD (fixed step drops) | 72p | 26% tok_acc | Identical to no WD adaptation; WD timing is irrelevant at 72p |
 | Cyclical WD (cosine) | 72p | 27% tok_acc | Same as scheduled; oscillating WD between high/low doesn't help |
 | WD warmup (zero→ramp) | 72p | 28% tok_acc | Model overfits during WD=0 phase, collapses when WD ramps in |
+| d_model=4, tok_dim=2, pos_dim=2 (56p) | 56p | 22-54% tok_acc | pos_dim=2 can't represent carry dimension (z_hi needs dim3) |
+| d_model=4, tok_dim=1, pos_dim=3 (58p) | 58p | Dead | **tok_dim=1 is mathematically impossible for 10-class output**: logits = scalar × [emb_0..emb_9], argmax depends only on sign → max 2 classes |
+| Scaffold L1 + prune (8 experiments) | various | All failed | L1 penalty is adversarial to task learning at small scale |
 
 ### Hard Constraints (Updated — Some Overturned)
 
@@ -264,6 +274,9 @@ These models all train from random initialization with no warm-starting. Every p
 | High carry-mix + step fade is optimal training | **New finding** | cm=0.8 + step fade 10K→80K + 120K steps: 3/3 seeds grok at 74p (vs 1/10 at 75p with cm=0.3) |
 | Metric-based carry_mix fade fails at high cm | **New finding** | Creates oscillation feedback loop: accuracy↑ → carries removed → accuracy↓ → carries restored |
 | Shorter step budget improves stability | **New finding** | 120K steps (vs 400K/500K) gives steeper cosine LR decay; LR ~0.007 at grokking stabilization |
+| d_model=4 is fundamentally dead | **New finding** | tok_dim=1: can't classify 10 digits (rank-1 logits). tok_dim=2: pos_dim=2 can't represent carry |
+| tok_dim ≥ 2 is mandatory | **New finding** | tok_dim=1 → logits = scalar × embedding_vector → argmax is binary → max 2 classes. Mathematical impossibility. |
+| Near-grok plateau exists at 70-72p | **New finding** | Models reach 72-73% exact / 97.5% tok_acc and oscillate indefinitely. Different from 74p's binary grok/fail. |
 | Grokking seeds are config-specific | **New finding** | 10-seed sweep: seeds that grok 75p fail 72p and vice versa. freeze_z_hi changes loss landscape topology, not just difficulty. |
 | "Flash grokking" occurs at small sizes | **New finding** | 75p s78779 hit 95.8% exact then crashed. Grokking basin is dynamically unstable for most seeds. |
 | Grok rate ~10-20% for random seeds | **New finding** | 10-seed sweep: ~2-4/10 seeds show grokking signals, ~1/10 approach 100%. Only s80085 works for both 75p and 72p. |
@@ -324,30 +337,101 @@ The discoverability gap has shrunk from 170/40 = **4.25x** to 75/40 = **1.88x** 
 
 ---
 
-## The Sub-75 Goal
+## The Sub-74 Goal
 
-Sub-100 has been achieved: 75p from scratch (seed 80085). The new target: **push the from-scratch frontier below 75 parameters**.
+The from-scratch SOTA is 74p (3/3 seeds grok). Strong near-grok signals at 70p (73.5% exact) confirm the architecture can *almost* solve the task with fewer params. The target: **push the from-scratch frontier to full 100% accuracy below 74 parameters**.
 
-72p already works from scratch with s80085. The question is whether we can go lower without warm-starting.
+### The Near-Grok Plateau: A New Phenomenon
 
-### Why Sub-75 From Scratch Is Hard
+At 70-72p, models reach ~72% exact / 97.5% tok_acc and oscillate indefinitely. This is qualitatively different from 74p where seeds either fully grok (100%) or fail completely (<1%). The plateau suggests:
 
-1. **Seed sensitivity is extreme.** At 75p, only ~10-20% of random seeds show grokking signals. Only s80085 is confirmed to stably grok both 75p and 72p.
-2. **70p from scratch fails.** Even with s80085, 70p (freeze spiral_offset+phase) is stuck at 36% tok_acc. Two frozen-at-zero spiral params somehow break learning dynamics.
-3. **Grokking seeds are config-specific.** Seeds that grok 75p fail 72p and vice versa. Each freeze changes the loss landscape topology, not just difficulty.
-4. **"Flash grokking" instability.** 75p s78779 spiked to 95.8% exact then crashed. The grokking basin is dynamically unstable for most seeds.
+1. **The carry circuit is partially expressible.** The model handles most additions correctly — it's the last 2.5% of digits (likely long carry chains or specific boundary cases) that oscillate.
+2. **The loss landscape has a metastable state.** The model finds a local minimum at 72% exact that is dynamically stable under training. At 74p, this state is transient (grokking pushes through it). At 70p, the LR is too high or capacity too tight to escape.
+3. **Training innovation may matter more than architecture here.** The gap from 72% → 100% might close with the right schedule (longer training, warm restarts, lower final LR, SWA) rather than more params.
 
-### Architecture-First, Then Training
+### Two Complementary Attack Vectors
 
-The path from 242→75 was primarily architectural compression. Training innovations (adaptive WD, carry-mix) made experiments faster but didn't reduce the parameter floor. Future work should focus on training innovations (scaffold weights, seed discovery) to push the from-scratch frontier below 75p, since the architectural budget is already very tight.
+**Architecture compression (free params):** Exploit the competition rule that sinusoidal encodings are free. Freeze all spiral params → digit positions become `[cos(2πi/10), sin(2πi/10), 0]`, a textbook sinusoidal encoding. This "costs" 0p by the rules, saving 4p from the 74p budget. Combined with structured q_proj (Toeplitz), this reaches 62p on paper.
+
+**Training innovation (close the plateau):** The 70p near-grok proves the architecture CAN almost solve addition with 70 learned params. Novel training techniques to push past the plateau could yield 100% accuracy at 70p or below without any architectural changes.
 
 ---
 
-## Experiment Plan: Path to Sub-100
+## Key Insight: Sinusoidal Positions Are Free
 
-### Exp 1: Vocab=10 — Eliminate Special Tokens (target: ~152p)
+The competition rules state: *"Fixed/sinusoidal positional encodings are not counted."*
 
-**Thesis:** Encode PLUS/EQUALS as reused digit-0 tokens, making delimiters positional rather than lexical. Saves ~18p:
+Our spiral positions with all params frozen become `[cos(2πi/10), sin(2πi/10), 0]` — a textbook sinusoidal encoding. This "costs" 0p by the rules. Combined with learned z_hi_pos (3p) and special_pos_equals (3p) — which are NOT sinusoidal — this gives a 4p saving from the 74p budget → 70p. The near-grok at 70p validates this: the model can almost solve addition with sinusoidal digit positions.
+
+### d_model=4 Is Proven Impossible
+
+Both valid splits fail:
+- **tok_dim=1, pos_dim=3 (58p):** tok_dim=1 → head_proj produces a scalar → logits = scalar × [emb_0,...,emb_9] → argmax depends only on sign → **max 2 classes. Mathematically impossible for 10-digit classification.**
+- **tok_dim=2, pos_dim=2 (56p):** pos_dim=2 can't represent carry (z_hi needs an orthogonal dimension to the digit circle). Dead at 22-54% tok_acc.
+
+d_model=5 is the minimum viable residual width. All further compression must happen within d_model=5.
+
+---
+
+## Current Experiment Plan: Path Below 74p
+
+### A. Sinusoidal Positions (70p — near-grok, implemented)
+
+Freeze all 4 spiral params → digit positions become `[cos(2πi/10), sin(2πi/10), 0]`. Free by competition rules. Near-grok: 73.5% exact, 97.5% tok_acc. Needs training innovation to push to 100%. Flag: `--freeze-spiral amp,phase,slope,offset`.
+
+### B. Training Innovations to Close the Near-Grok Plateau
+
+The 70p near-grok (73.5% exact, oscillating for 100K+ steps) suggests the architecture CAN represent the solution but training can't lock it in. Ideas from the literature:
+
+1. **Stochastic Weight Averaging (SWA)** (Izmailov et al., 2018): Average model weights over the oscillation trajectory. The 70p model oscillates between 58-73% exact — individual checkpoints are unstable but their average might be stable. Could be applied post-training.
+
+2. **Cosine Annealing with Warm Restarts (SGDR)** (Loshchilov & Hutter, 2017): Periodically reset LR to escape shallow minima. Each restart is shorter, progressively focusing the optimizer. Could combine with SWA: average across restarts.
+
+3. **EMA of weights**: Maintain a shadow copy with exponential moving average (decay ~0.999). EMA often finds better solutions in oscillating regimes. Negligible cost (one extra copy of 70 params).
+
+4. **Lower minimum LR / longer training**: The 70p plateau might need LR < 1e-3 to converge. Try 400K steps (final LR ~1e-3) or explicit `--min-lr` parameter.
+
+5. **Late carry-mix re-injection**: Carry_mix fades to 0 by step 80K, but 70p grokking starts at ~90K — after carries are gone. Re-injecting small carry_mix (0.2) during the plateau might help stabilize the carry circuit.
+
+6. **Knowledge distillation from 74p**: Train 74p teacher to 100%, distill to 70p student via soft logits. No weight transfer — student learns from teacher's *behavior*. Conceptually clean and architecturally legitimate.
+
+### D. Further Structural Compression Ideas
+
+
+2. **Fix out_proj.B to one-hot (save 5p)**: 75p diagnostics showed out_proj.B writes almost entirely to dim1 (value -2.27, others <0.03). Fixing B=[0,1,0,0,0] is an architectural choice, not a frozen learned value. Risk: model might need B in a different direction at lower param counts.
+
+3. **Freeze special_pos_equals (save 3p)**: Can EQUALS position work at zero from scratch? The warm-start cascade showed this works with trained values. Open question for zero init.
+
+4. **KAN (Kolmogorov-Arnold Networks)**: Replace fixed GELU with learnable spline activations. The carry function is a threshold (digit sum ≥ 10) — a small spline could capture this more efficiently than 2 GELU units. Research direction, requires implementation.
+
+5. **Parameterless norm (save 5p)**: Shared RMSNorm is 5p. Weights are [1.70, 3.14, 1.78, 1.80, 11.03] — dim4 amplified 6.5x for feature gating. Scalar norm failed. But if the right fixed weights could be derived analytically...
+
+### E. Resolved Questions
+
+| Question | Answer |
+|----------|--------|
+| Is vocab=10 compatible? | **Yes.** Works at all scales 242p→74p. |
+| Minimum d_model? | **d_model=5.** d_model=4 is mathematically impossible. |
+| Can tied V/O work at d_model>2? | **Yes.** Works at d_model=5 (tie_vo saves 10p). |
+| Can positions be frozen? | **Partially.** Spiral → sinusoidal (free). z_hi and EQUALS must be learned. |
+| Does scaffold L1+prune work? | **No.** 8 experiments all failed. L1 is adversarial at small scale. |
+| Can high carry-mix improve grok rate? | **Yes, dramatically.** cm=0.8 + step-fade → 3/3 seeds at 74p. |
+
+---
+
+## Open Questions
+
+1. **Can the 70p near-grok plateau be broken?** The model reaches 73.5% exact / 97.5% tok_acc and oscillates. Training problem or capacity limit? THE central question.
+
+3. **What is the representational floor with sinusoidal positions?** Digit positions free, only z_hi (3p) + equals_pos (3p) + computational weights. How low can we go?
+
+4. **Can knowledge distillation bypass the optimization barrier?** A 74p teacher with 100% accuracy could guide a 70p student through soft labels. Architecturally legitimate.
+
+5. **Is SWA/EMA the right tool for oscillating grokking?** The 70p model's oscillation might average to a stable solution. Cheapest intervention to test.
+
+### Historical Experiments (Completed — See Experiment Log)
+
+The experiments below (Exp 1-7) drove the compression from 242p to 74p and are now complete. Their results are captured in the experiment log tables above. Key learnings: vocab=10 works, d_model=5 is minimum, parametric tok_emb works, tied V/O works at d_model=5, softmax1 and ALiBi fail, scaffold L1 fails. All successful techniques are already incorporated into the 74p architecture.
 - tok_emb: 14x2 → 10x2 = -8p
 - special_pos: eliminated = -8p (PLUS/EQUALS no longer need unique learned positions)
 - head_proj output: tied head now discriminates 10 classes instead of 14

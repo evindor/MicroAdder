@@ -57,6 +57,7 @@ class ModelConfig:
     freeze_tok_arc: str = ""        # Comma-separated arc params to freeze: "start,stride" etc
     tie_tok_arc_ab: bool = False    # Tie tok_arc_A = tok_arc_B (circular, saves 1p)
     q_proj_rank: int = 0            # 0 = full rank q_proj; >0 = low-rank factorization (saves params)
+    q_proj_mode: str = "full"       # "full" | "toeplitz" — toeplitz uses (in+out-1) params instead of in*out
     softmax1: bool = False          # Use softmax1 (add 1 to denominator, allows attn sum < 1)
     attn_mode: str = "split"        # "split" | "offset" | "hard_offset"
 
@@ -111,6 +112,36 @@ class LowRankLinear(nn.Module):
         return x @ self.A @ self.B
 
 
+class ToeplitzLinear(nn.Module):
+    """Linear layer with Toeplitz-constrained weight matrix.
+
+    A (out_features x in_features) Toeplitz matrix has constant diagonals,
+    requiring only (in_features + out_features - 1) params instead of in*out.
+    Equivalent to a 1D convolution / cross-correlation.
+    """
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        n_params = in_features + out_features - 1
+        self.vals = nn.Parameter(torch.empty(n_params))
+        # Kaiming-like init scaled to effective fan_in
+        nn.init.normal_(self.vals, std=1.0 / math.sqrt(in_features))
+
+    def _build_weight(self) -> torch.Tensor:
+        """Construct (out_features, in_features) Toeplitz matrix from vals."""
+        # vals layout: [row_{out-1}, ..., row_1, diag, col_1, ..., col_{in-1}]
+        # Row i, col j uses vals[out_features - 1 - i + j]
+        idx = torch.arange(self.in_features, device=self.vals.device)
+        row_offsets = torch.arange(self.out_features - 1, -1, -1, device=self.vals.device)
+        indices = row_offsets.unsqueeze(1) + idx.unsqueeze(0)  # (out, in)
+        return self.vals[indices]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        W = self._build_weight()
+        return x @ W.T
+
+
 # ── Attention ──────────────────────────────────────────────────────────────
 
 class SplitAttention(nn.Module):
@@ -142,6 +173,8 @@ class SplitAttention(nn.Module):
         qk_in_dim = cfg.tok_dim if cfg.qk_source == "tok" else cfg.pos_dim
         if cfg.q_proj_rank > 0:
             self.q_proj = LowRankLinear(qk_in_dim, self.inner_dim, cfg.q_proj_rank)
+        elif cfg.q_proj_mode == "toeplitz":
+            self.q_proj = ToeplitzLinear(qk_in_dim, self.inner_dim)
         else:
             self.q_proj = nn.Linear(qk_in_dim, self.inner_dim, bias=False)
         if not cfg.tie_qk:
@@ -550,7 +583,7 @@ class MicroAdder(nn.Module):
             # Parametric: digits placed on a learnable arc in 2D
             # emb[d] = [A * cos(start + d * stride), B * sin(start + d * stride)]
             # 4 params for 10+ digits, instead of 20+ learned
-            assert cfg.tok_dim == 2, "Parametric tok_emb only supports tok_dim=2"
+            assert cfg.tok_dim in (1, 2), "Parametric tok_emb supports tok_dim=1 or 2"
             frozen_arc = set(cfg.freeze_tok_arc.split(",")) if cfg.freeze_tok_arc else set()
             for name, init_val in [("A", 2.5), ("B", 2.5), ("start", -1.2), ("stride", 0.29)]:
                 if name in frozen_arc:
@@ -643,9 +676,12 @@ class MicroAdder(nn.Module):
             # pos_dim==2: amp*cos(+phase), slope*sin(+offset) (ellipse with independent phases)
             frozen_spiral = set(cfg.freeze_spiral.split(",")) if cfg.freeze_spiral else set()
             slope_init = 1.0 if cfg.pos_dim == 2 else 1.0 / max(1, MAX_DIGITS - 1)
+            # When freezing slope, use 0.0 (learned value converges near 0 anyway)
+            frozen_overrides = {"slope": 0.0, "offset": 0.0}
             for name, init_val in [("amp", 1.0), ("phase", 0.0), ("slope", slope_init), ("offset", 0.0)]:
                 if name in frozen_spiral:
-                    self.register_buffer(f"spiral_{name}", torch.tensor(init_val))
+                    freeze_val = frozen_overrides.get(name, init_val)
+                    self.register_buffer(f"spiral_{name}", torch.tensor(freeze_val))
                 else:
                     setattr(self, f"spiral_{name}", nn.Parameter(torch.tensor(init_val)))
             # Per-position scale correction
@@ -826,6 +862,9 @@ class MicroAdder(nn.Module):
         d = torch.arange(self.cfg.vocab_size, device=self.tok_arc_A.device,
                          dtype=self.tok_arc_A.dtype)
         angles = self.tok_arc_start + d * self.tok_arc_stride
+        if self.cfg.tok_dim == 1:
+            # 1D: digits on a cosine curve
+            return (self.tok_arc_A * torch.cos(angles)).unsqueeze(1)
         emb = torch.stack([
             self.tok_arc_A * torch.cos(angles),
             self.tok_arc_B * torch.sin(angles),

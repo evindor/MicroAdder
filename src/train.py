@@ -1011,6 +1011,8 @@ def parse_args():
                    help="Add learnable per-head phase rotation to Q (for tied Q/K asymmetry)")
     p.add_argument("--q-proj-rank", type=int, default=0,
                    help="Low-rank factorization of q_proj (0=full rank)")
+    p.add_argument("--q-proj-mode", type=str, default="full", choices=["full", "toeplitz"],
+                   help="Q projection structure: full (in*out params) or toeplitz (in+out-1 params)")
     p.add_argument("--share-layers", action="store_true", default=False)
     p.add_argument("--norm-mode", default="full", choices=["full", "shared", "scalar", "fixed", "no_ln2"],
                    help="RMSNorm mode: full (18p), shared (6p), scalar (1p), fixed (0p), no_ln2 (12p)")
@@ -1179,6 +1181,7 @@ def main():
         num_kv_heads=args.num_kv_heads,
         q_phase=args.q_phase,
         q_proj_rank=args.q_proj_rank,
+        q_proj_mode=args.q_proj_mode,
         share_layers=args.share_layers,
         norm_mode=args.norm_mode,
         freeze_pad=args.freeze_pad,
