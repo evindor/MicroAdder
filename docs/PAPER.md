@@ -268,13 +268,9 @@ The q_proj (12p) is now the largest single parameter block. At 4×3 it is more c
 
 ### 7.3 Knowledge Distillation
 
-A 74p teacher could guide a smaller student through soft logits, providing training signal without any weight transfer. Every parameter in the student would be learned from scratch — the teacher constrains the input→output mapping, not the internal weights. This is philosophically clean and architecturally legitimate.
+A 67p teacher could guide a smaller student through soft logits, providing training signal without any weight transfer. Every parameter in the student would be learned from scratch — the teacher constrains the input→output mapping, not the internal weights. This is philosophically clean and architecturally legitimate.
 
-### 7.4 Why Does Grokking Happen?
-
-Our model exhibits textbook grokking: sudden generalization after prolonged memorization. Weight decay plays a key role (dropping WD at the right moment unlocks the transition), but the deeper mechanism is unclear. Why does the carry circuit crystallize suddenly rather than gradually? Why are some seeds capable of finding the basin and others not? Loss landscape visualization (projecting the 74D parameter space onto 2D) could reveal the basin structure.
-
-### 7.5 Minimum Viable Transformer
+### 7.4 Minimum Viable Transformer
 
 Is there a theoretical lower bound on trained transformer parameters for N-digit addition? The representational floor is ~36p, but how much overhead does learnability fundamentally require? At 67p, the overhead factor is 1.68× — steadily shrinking from 1.85× at 74p. Are we approaching a hard boundary or will clever architecture+training keep finding savings?
 
@@ -306,7 +302,7 @@ Expected output: 10010/10010 correct (100.00%), QUALIFIED.
 
 ### Hardware
 
-Trained on a single GPU. The 67p model trains for 60K steps (~5 minutes). Inference is essentially instant.
+Trained on a single GPU. The 67p model trains for 60K steps. Inference is essentially instant.
 
 ---
 
