@@ -244,51 +244,310 @@ section .section-desc {
   font-size: 0.82rem;
   color: #8b949e;
 }
-.attn-controls select {
-  padding: 4px 8px;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  color: #c9d1d9;
-  font-size: 0.82rem;
+
+/* ── Range slider (shared dark theme) ────────────────────── */
+input[type="range"].dark-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 220px;
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"].dark-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 6px #58a6ff66;
+  cursor: grab;
+}
+input[type="range"].dark-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 6px #58a6ff66;
+  cursor: grab;
+}
+input[type="range"].dark-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+}
+input[type="range"].dark-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: #21262d;
+}
+.slider-pos-label {
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 0.88rem;
+  color: #f0f6fc;
+  font-weight: 600;
+  min-width: 170px;
 }
 
-/* ── Forward Pass Step Viz ────────────────────────────────── */
-.step-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-.step-controls label {
-  font-size: 0.85rem;
-  color: #8b949e;
-}
-.step-controls select, .step-controls input {
-  padding: 4px 8px;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  color: #c9d1d9;
-  font-size: 0.82rem;
-}
-.step-stage {
+/* ── Forward Pass Interactive Stepper ─────────────────────── */
+
+/* Problem display grid */
+.fwd-problem {
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  overflow-x: auto;
 }
-.step-stage h4 {
+.fwd-problem table {
+  border-collapse: collapse;
+  margin: 0 auto;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 0.85rem;
+}
+.fwd-problem td {
+  text-align: center;
+  padding: 2px 0;
+  width: 36px;
+  min-width: 36px;
+}
+.fwd-problem .row-label {
+  text-align: right;
+  padding-right: 10px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  width: auto;
+  min-width: auto;
+  white-space: nowrap;
+}
+.fwd-problem .col-current {
+  background: #58a6ff18;
+  border-left: 2px solid #58a6ff;
+  border-right: 2px solid #58a6ff;
+}
+.fwd-problem .col-current-top { border-top: 2px solid #58a6ff; }
+.fwd-problem .col-current-bot { border-bottom: 2px solid #58a6ff; }
+.fwd-problem .digit-x { color: #79c0ff; }
+.fwd-problem .digit-y { color: #ffa198; }
+.fwd-problem .digit-z { color: #7ee787; font-weight: 700; }
+.fwd-problem .digit-z.future { color: #484f58; }
+.fwd-problem .digit-carry { font-size: 0.7rem; }
+.fwd-problem .digit-carry.c1 { color: #ffa198; }
+.fwd-problem .digit-carry.c0 { color: #484f58; }
+.fwd-problem .sep-row td { border-top: 1px solid #30363d; }
+
+@keyframes fwd-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.fwd-problem .digit-z.current {
+  color: #58a6ff;
+  animation: fwd-pulse 1s ease-in-out infinite;
+  font-weight: 700;
+}
+
+/* Navigation bar */
+.fwd-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.fwd-nav button {
+  padding: 7px 18px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+.fwd-nav button:hover:not(:disabled) { background: #30363d; color: #f0f6fc; }
+.fwd-nav button:disabled { opacity: 0.3; cursor: default; }
+.fwd-nav .step-label {
   font-size: 0.9rem;
   color: #f0f6fc;
-  margin-bottom: 8px;
+  font-weight: 600;
+  min-width: 220px;
+  text-align: center;
 }
-.step-stage .stage-info {
+.fwd-nav .step-dots {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.fwd-nav .step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #30363d;
+  transition: all 0.2s;
+}
+.fwd-nav .step-dot.done { background: #7ee787; }
+.fwd-nav .step-dot.active { background: #58a6ff; box-shadow: 0 0 6px #58a6ff88; transform: scale(1.3); }
+
+/* Pipeline stage cards */
+.fwd-stage {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-left: 4px solid #30363d;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  transition: border-color 0.3s;
+}
+.fwd-stage.stage-embed { border-left-color: #58a6ff; }
+.fwd-stage.stage-attn  { border-left-color: #58a6ff; }
+.fwd-stage.stage-ffn   { border-left-color: #7ee787; }
+.fwd-stage.stage-ffn.carry-active { border-left-color: #ffa198; }
+.fwd-stage.stage-out   { border-left-color: #7ee787; }
+.fwd-stage h4 {
+  font-size: 0.92rem;
+  color: #f0f6fc;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fwd-stage h4 .stage-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #21262d;
+  font-size: 0.75rem;
+  color: #8b949e;
+  font-weight: 700;
+}
+.fwd-stage .stage-info {
   font-size: 0.78rem;
   color: #8b949e;
   margin-bottom: 8px;
+}
+.fwd-stage .stage-headline {
+  font-size: 0.88rem;
+  color: #c9d1d9;
+  margin-bottom: 6px;
+}
+
+/* Carry detection meters */
+.carry-meters {
+  display: flex;
+  gap: 20px;
+  margin: 10px 0;
+  flex-wrap: wrap;
+}
+.carry-meter {
+  flex: 1;
+  min-width: 160px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px 14px;
+  text-align: center;
+}
+.carry-meter .meter-label {
+  font-size: 0.72rem;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.carry-meter .meter-bar {
+  height: 12px;
+  border-radius: 6px;
+  background: #21262d;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.carry-meter .meter-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.4s ease;
+}
+.carry-meter .meter-val {
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.carry-meter.active { box-shadow: 0 0 12px #ffa19844; border-color: #ffa198; }
+.carry-meter.active .meter-fill { background: #ffa198; }
+.carry-meter.active .meter-val { color: #ffa198; }
+.carry-meter.inactive .meter-fill { background: #7ee787; }
+.carry-meter.inactive .meter-val { color: #7ee787; }
+
+/* Carry verdict banner */
+.carry-verdict {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: center;
+  margin-top: 8px;
+}
+.carry-verdict.has-carry {
+  background: #da363322;
+  color: #ffa198;
+  border: 1px solid #da363366;
+}
+.carry-verdict.no-carry {
+  background: #23863622;
+  color: #7ee787;
+  border: 1px solid #23863666;
+}
+
+/* Running carry chain */
+.fwd-carry-chain {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding: 12px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+}
+.fwd-carry-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 36px;
+}
+.fwd-carry-cell .cc-digit {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 0.95rem;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.fwd-carry-cell .cc-digit.no-carry { background: #23863633; color: #7ee787; }
+.fwd-carry-cell .cc-digit.has-carry { background: #da363333; color: #ffa198; }
+.fwd-carry-cell .cc-digit.future { background: #21262d; color: #484f58; }
+.fwd-carry-cell .cc-label {
+  font-size: 0.6rem;
+  color: #484f58;
+  margin-top: 2px;
+  font-family: monospace;
+}
+.fwd-carry-cell .cc-arrow {
+  font-size: 0.55rem;
+  margin: 1px 0;
+  color: #484f58;
 }
 .bar-chart {
   display: flex;
@@ -552,7 +811,8 @@ footer {
     <h3>Attention Weights for Answer Positions</h3>
     <div class="attn-controls">
       <label>Output position:</label>
-      <select id="attnPosSelect" onchange="drawAttnRow()"></select>
+      <input type="range" class="dark-slider" id="attnPosSlider" min="0" max="10" value="0" oninput="drawAttnRow()">
+      <span class="slider-pos-label" id="attnPosLabel">Z[0] — position 22</span>
       <span class="muted" id="attnInfo"></span>
     </div>
     <svg id="svgAttn" width="860" height="200"></svg>
@@ -563,14 +823,12 @@ footer {
 <!-- ─────────── Section 6: Forward Pass ─────────── -->
 <section id="sec-forward">
   <h2>Step-by-Step Forward Pass</h2>
-  <p class="section-desc">Watch the 5D residual stream transform through each layer for a specific answer digit. Select which output position to inspect.</p>
-  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;">
-    <div class="step-controls">
-      <label>Answer digit:</label>
-      <select id="fwdStepSelect" onchange="drawForwardPass()"></select>
-      <span class="muted" id="fwdStepInfo"></span>
-    </div>
+  <p class="section-desc">Walk through the addition digit by digit and watch the model think. Use the arrow keys or buttons to step through each column.</p>
+  <div class="viz-panel full-width" style="max-width:900px;margin:0 auto;" tabindex="0" id="fwdPanel">
+    <div id="fwdProblem"></div>
+    <div id="fwdNavBar"></div>
     <div id="fwdStages"></div>
+    <div id="fwdCarryChain"></div>
   </div>
 </section>
 
@@ -1049,10 +1307,9 @@ function updateAllViz() {
   drawTokenY();
   drawPosSpiral();
   drawPosNorms();
-  populateAttnSelect();
   drawAttnRow();
-  populateFwdSelect();
-  drawForwardPass();
+  fwdStep = 0;
+  drawForwardStepper();
   populateLogitSelect();
   drawLogits();
   drawCarryChain();
@@ -1310,20 +1567,10 @@ function drawPosNorms() {
 
 // ── Attention Visualization ─────────────────────────────────────────
 
-function populateAttnSelect() {
-  const sel = document.getElementById('attnPosSelect');
-  sel.innerHTML = '';
-  for (let i = 0; i < ANSWER_LEN; i++) {
-    const opt = document.createElement('option');
-    opt.value = i;
-    opt.textContent = `Z[${i}] (position ${Z_START + i})`;
-    sel.appendChild(opt);
-  }
-}
-
 function drawAttnRow() {
   if (!lastResult) return;
-  const step = parseInt(document.getElementById('attnPosSelect').value) || 0;
+  const step = parseInt(document.getElementById('attnPosSlider').value) || 0;
+  document.getElementById('attnPosLabel').textContent = `Z[${step}] — position ${Z_START + step}`;
   const trace = lastResult.traces[step];
   if (!trace) return;
 
@@ -1397,99 +1644,276 @@ function drawAttnRow() {
 
 // ── Forward Pass Visualization ──────────────────────────────────────
 
-function populateFwdSelect() {
-  const sel = document.getElementById('fwdStepSelect');
-  sel.innerHTML = '';
-  for (let i = 0; i < ANSWER_LEN; i++) {
-    const opt = document.createElement('option');
-    opt.value = i;
-    const digit = lastResult ? lastResult.generated[i] : '?';
-    opt.textContent = `Z[${i}] = ${digit}`;
-    sel.appendChild(opt);
-  }
-}
+let fwdStep = 0;
 
-function drawForwardPass() {
+function fwdPrev() { if (fwdStep > 0) { fwdStep--; drawForwardStepper(); } }
+function fwdNext() { if (fwdStep < ANSWER_LEN - 1) { fwdStep++; drawForwardStepper(); } }
+
+function drawForwardStepper() {
   if (!lastResult) return;
-  const step = parseInt(document.getElementById('fwdStepSelect').value) || 0;
+  const step = fwdStep;
   const trace = lastResult.traces[step];
   if (!trace) return;
 
-  const container = document.getElementById('fwdStages');
+  const R = lastResult;
+  const aStr = document.getElementById('inputA').value.replace(/\D/g, '') || '0';
+  const bStr = document.getElementById('inputB').value.replace(/\D/g, '') || '0';
+  const a = parseInt(aStr, 10) || 0;
+  const b = parseInt(bStr, 10) || 0;
+  const carries = computeCarries(a, b);
+
+  // ── A. Problem display ──
+  let prob = '<div class="fwd-problem"><table>';
+
+  // Header row: position indices
+  prob += '<tr><td class="row-label">pos:</td>';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i === step ? 'col-current col-current-top' : '';
+    prob += `<td class="${cls}" style="color:#484f58;font-size:0.7rem">${i}</td>`;
+  }
+  prob += '</tr>';
+
+  // X row
+  prob += '<tr><td class="row-label">X:</td>';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i === step ? 'col-current' : '';
+    const val = i < 10 ? R.xDigits[i] : '';
+    prob += `<td class="${cls} digit-x">${val}</td>`;
+  }
+  prob += '</tr>';
+
+  // Y row
+  prob += '<tr><td class="row-label">Y:</td>';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i === step ? 'col-current' : '';
+    const val = i < 10 ? R.yDigits[i] : '';
+    prob += `<td class="${cls} digit-y">${val}</td>`;
+  }
+  prob += '</tr>';
+
+  // Separator
+  prob += '<tr class="sep-row"><td class="row-label">carry:</td>';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i === step ? 'col-current' : '';
+    if (i <= step) {
+      const cin = carries.carryIn[i];
+      prob += `<td class="${cls} digit-carry ${cin ? 'c1' : 'c0'}">${cin}</td>`;
+    } else {
+      prob += `<td class="${cls}"></td>`;
+    }
+  }
+  prob += '</tr>';
+
+  // Z row
+  prob += '<tr><td class="row-label">Z:</td>';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i === step ? 'col-current col-current-bot' : '';
+    if (i < step) {
+      prob += `<td class="${cls} digit-z">${R.generated[i]}</td>`;
+    } else if (i === step) {
+      prob += `<td class="${cls} digit-z current">?</td>`;
+    } else {
+      prob += `<td class="${cls} digit-z future">?</td>`;
+    }
+  }
+  prob += '</tr>';
+
+  prob += '</table></div>';
+  document.getElementById('fwdProblem').innerHTML = prob;
+
+  // ── B. Navigation bar ──
+  let nav = '<div class="fwd-nav">';
+  nav += `<button onclick="fwdPrev()" ${step === 0 ? 'disabled' : ''}>&#8592; Prev</button>`;
+  nav += `<span class="step-label">Step ${step + 1} of ${ANSWER_LEN} &mdash; Computing Z[${step}]</span>`;
+  nav += `<button onclick="fwdNext()" ${step === ANSWER_LEN - 1 ? 'disabled' : ''}>Next &#8594;</button>`;
+  nav += '</div>';
+  // Progress dots
+  nav += '<div class="fwd-nav"><div class="step-dots">';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    const cls = i < step ? 'done' : i === step ? 'active' : '';
+    nav += `<div class="step-dot ${cls}"></div>`;
+  }
+  nav += '</div></div>';
+  document.getElementById('fwdNavBar').innerHTML = nav;
+
+  // ── C. Pipeline stages ──
   const dimNames = ['tok0', 'tok1', 'pos0', 'pos1', 'pos2'];
   const dimColors = [COLORS.tok, COLORS.tok, COLORS.pos, COLORS.pos, COLORS.pos];
 
-  function makeBarChart(values, label, colors) {
+  function makeBarChart(values, labels, colors) {
     const maxAbs = Math.max(...values.map(Math.abs), 0.001);
-    let html = `<div class="bar-chart">`;
+    let h = '<div class="bar-chart">';
     for (let i = 0; i < values.length; i++) {
-      const h = Math.abs(values[i]) / maxAbs * 60;
+      const bh = Math.abs(values[i]) / maxAbs * 60;
       const c = colors ? colors[i] : COLORS.accent;
       const isNeg = values[i] < 0;
-      html += `<div class="bar-wrapper">`;
-      html += `<div class="bar-val">${values[i].toFixed(2)}</div>`;
-      html += `<div class="bar" style="height:${h.toFixed(0)}px;background:${c};opacity:${isNeg ? 0.5 : 0.8}"></div>`;
-      html += `<div class="bar-label">${label ? label[i] : i}</div>`;
-      html += `</div>`;
+      h += '<div class="bar-wrapper">';
+      h += `<div class="bar-val">${values[i].toFixed(2)}</div>`;
+      h += `<div class="bar" style="height:${bh.toFixed(0)}px;background:${c};opacity:${isNeg ? 0.5 : 0.8}"></div>`;
+      h += `<div class="bar-label">${labels ? labels[i] : i}</div>`;
+      h += '</div>';
     }
-    html += '</div>';
-    return html;
+    h += '</div>';
+    return h;
   }
 
   let html = '';
 
-  // Stage 1: Embedding
-  html += '<div class="step-stage">';
-  html += '<h4>1. Token + Position Embedding</h4>';
-  html += `<div class="stage-info">Token (2D) | Position (3D) = 5D residual vector</div>`;
+  // --- Stage 1: Embedding ---
+  const tokIdx = trace.embedding[0] !== undefined ? R.tokens[trace.seqPos - 1] : 0;
+  // The token at the last position when generating Z[step]
+  // For step 0, it's the EQUALS token (tokens[21])
+  // For step > 0, it's Z[step-1]
+  const inputTokIdx = step === 0 ? 0 : R.generated[step - 1];
+  const inputTokLabel = step === 0 ? 'EQUALS' : `Z[${step-1}] = ${R.generated[step - 1]}`;
+
+  html += '<div class="fwd-stage stage-embed">';
+  html += `<h4><span class="stage-num">1</span> Embedding</h4>`;
+  html += `<div class="stage-headline">Token: ${inputTokLabel} &rarr; embed = [${trace.embedding[0].toFixed(2)}, ${trace.embedding[1].toFixed(2)}]</div>`;
+  html += `<div class="stage-info">Position: sinusoidal pos ${step} &rarr; [${trace.embedding[2].toFixed(2)}, ${trace.embedding[3].toFixed(2)}, ${trace.embedding[4].toFixed(2)}]</div>`;
   html += makeBarChart(Array.from(trace.embedding), dimNames, dimColors);
   html += '</div>';
 
-  // Stage 2: After attention
-  html += '<div class="step-stage">';
-  html += '<h4>2. After Attention + Rank-1 Output Projection</h4>';
-  html += `<div class="stage-info">Attention gathers V from attended positions, then rank-1 projects back to residual (mainly writes dim1)</div>`;
-  html += makeBarChart(Array.from(trace.afterAttn), dimNames, dimColors);
-  html += `<div class="stage-info" style="margin-top:8px;">Out_proj contribution: [${Array.from(trace.outProj).map(v => v.toFixed(3)).join(', ')}]</div>`;
+  // --- Stage 2: Attention ---
+  const aw = trace.attnWeights;
+  // Find top attended positions
+  const sorted = aw.map((w, i) => ({w, i})).sort((a, b) => b.w - a.w);
+  const top = sorted.filter(s => s.w > 0.02).slice(0, 5);
+
+  // Identify the main X and Y positions attended
+  let headlineAttn = '';
+  const topX = top.filter(s => s.i < 10);
+  const topY = top.filter(s => s.i >= 11 && s.i < 21);
+  if (topX.length > 0 && topY.length > 0) {
+    const xi = topX[0].i;
+    const yi = topY[0].i - 11;
+    const xDigit = R.xDigits[xi];
+    const yDigit = R.yDigits[yi];
+    headlineAttn = `Looks at X[${xi}]=${xDigit} (${(topX[0].w*100).toFixed(0)}%) and Y[${yi}]=${yDigit} (${(topY[0].w*100).toFixed(0)}%)`;
+    const cin = carries.carryIn[step];
+    headlineAttn += `<br><span class="stage-info" style="margin:0">Gathering digit pair: ${xDigit} + ${yDigit}${cin ? ' + 1 (carry)' : ''} = ${xDigit + yDigit + cin}</span>`;
+  } else {
+    headlineAttn = `Top: ${top.map(s => {
+      let name = s.i < 10 ? `X[${s.i}]` : s.i === 10 ? '+' : s.i < 21 ? `Y[${s.i-11}]` : s.i === 21 ? '=' : `Z[${s.i-22}]`;
+      return `${name} (${(s.w*100).toFixed(0)}%)`;
+    }).join(', ')}`;
+  }
+
+  html += '<div class="fwd-stage stage-attn">';
+  html += `<h4><span class="stage-num">2</span> Attention</h4>`;
+  html += `<div class="stage-headline">${headlineAttn}</div>`;
+
+  // Mini bar chart of top attended positions
+  if (top.length > 0) {
+    const topLabels = top.map(s => {
+      if (s.i < 10) return `X${s.i}`;
+      if (s.i === 10) return '+';
+      if (s.i < 21) return `Y${s.i-11}`;
+      if (s.i === 21) return '=';
+      return `Z${s.i-22}`;
+    });
+    const topWeights = top.map(s => s.w);
+    const maxW = Math.max(...topWeights);
+    html += '<div class="bar-chart" style="height:50px">';
+    for (let i = 0; i < top.length; i++) {
+      const bh = topWeights[i] / maxW * 40;
+      let c = COLORS.dim;
+      if (top[i].i < 10) c = COLORS.tok;
+      else if (top[i].i >= 11 && top[i].i < 21) c = COLORS.carry;
+      else if (top[i].i >= 22) c = COLORS.good;
+      html += '<div class="bar-wrapper">';
+      html += `<div class="bar-val">${(topWeights[i]*100).toFixed(0)}%</div>`;
+      html += `<div class="bar" style="height:${bh.toFixed(0)}px;background:${c};opacity:0.8"></div>`;
+      html += `<div class="bar-label">${topLabels[i]}</div>`;
+      html += '</div>';
+    }
+    html += '</div>';
+  }
   html += '</div>';
 
-  // Stage 3: FFN
-  html += '<div class="step-stage">';
-  html += '<h4>3. FFN (Carry Detection)</h4>';
-  html += `<div class="stage-info">Two GELU hidden units. Unit 0 = "carry detector", Unit 1 = "no-carry detector".</div>`;
-  html += `<div style="display:flex;gap:24px;flex-wrap:wrap;">`;
-  html += `<div><strong style="font-size:0.8rem;color:${COLORS.carry}">Hidden unit 0:</strong> <span class="mono">${trace.ffnHidden[0].toFixed(4)}</span> ${trace.ffnHidden[0] > 0.1 ? '(active)' : '(inactive)'}</div>`;
-  html += `<div><strong style="font-size:0.8rem;color:${COLORS.good}">Hidden unit 1:</strong> <span class="mono">${trace.ffnHidden[1].toFixed(4)}</span> ${trace.ffnHidden[1] > 0.1 ? '(active)' : '(inactive)'}</div>`;
+  // --- Stage 3: FFN (Carry Detection) ---
+  const u0 = trace.ffnHidden[0];
+  const u1 = trace.ffnHidden[1];
+  const u0active = u0 > 0.1;
+  const u1active = u1 > 0.1;
+  const maxU = Math.max(Math.abs(u0), Math.abs(u1), 0.01);
+  const hasCarry = carries.carryOut[step] === 1;
+
+  html += `<div class="fwd-stage stage-ffn ${hasCarry ? 'carry-active' : ''}">`;
+  html += `<h4><span class="stage-num">3</span> Carry Detection (FFN)</h4>`;
+
+  // Two meters side by side
+  html += '<div class="carry-meters">';
+  html += `<div class="carry-meter ${u0active ? 'active' : 'inactive'}">`;
+  html += `<div class="meter-label">Carry unit</div>`;
+  html += `<div class="meter-bar"><div class="meter-fill" style="width:${(Math.max(u0, 0) / maxU * 100).toFixed(0)}%"></div></div>`;
+  html += `<div class="meter-val">${u0.toFixed(3)} ${u0active ? 'ACTIVE' : 'inactive'}</div>`;
   html += '</div>';
-  html += `<div class="stage-info" style="margin-top:8px;">After FFN residual:</div>`;
-  html += makeBarChart(Array.from(trace.afterFFN), dimNames, dimColors);
+  html += `<div class="carry-meter ${u1active ? 'inactive' : 'active'}">`;
+  html += `<div class="meter-label">Clean unit</div>`;
+  html += `<div class="meter-bar"><div class="meter-fill" style="width:${(Math.max(u1, 0) / maxU * 100).toFixed(0)}%"></div></div>`;
+  html += `<div class="meter-val">${u1.toFixed(3)} ${u1active ? 'ACTIVE' : 'inactive'}</div>`;
+  html += '</div>';
   html += '</div>';
 
-  // Stage 4: Output
-  html += '<div class="step-stage">';
-  html += '<h4>4. Output Head (2D Projection)</h4>';
-  html += `<div class="stage-info">head_proj maps 5D &rarr; 2D, then dot product with each digit embedding gives 10 logits.</div>`;
-  html += `<div class="stage-info">2D projection: [${trace.proj2d[0].toFixed(3)}, ${trace.proj2d[1].toFixed(3)}]</div>`;
+  // Verdict
+  const xi2 = step < 10 ? R.xDigits[step] : 0;
+  const yi2 = step < 10 ? R.yDigits[step] : 0;
+  const cin = carries.carryIn[step];
+  const digitSum = xi2 + yi2 + cin;
+  if (hasCarry) {
+    html += `<div class="carry-verdict has-carry">CARRY! (${step < 10 ? `${xi2}+${yi2}` : '0+0'}+${cin} = ${digitSum} &ge; 10)</div>`;
+  } else {
+    html += `<div class="carry-verdict no-carry">No carry (${step < 10 ? `${xi2}+${yi2}` : '0+0'}+${cin} = ${digitSum} &lt; 10)</div>`;
+  }
+  html += '</div>';
 
-  // Logit bars
-  const maxLogit = Math.max(...trace.logits);
+  // --- Stage 4: Output ---
+  html += '<div class="fwd-stage stage-out">';
+  html += `<h4><span class="stage-num">4</span> Output</h4>`;
+
+  // Probability bars for all 10 digits
   html += '<div class="logits-chart">';
   for (let v = 0; v < VOCAB; v++) {
     const prob = trace.probs[v];
-    const h = Math.max(prob * 90, 1);
+    const bh = Math.max(prob * 90, 1);
     const isWinner = v === trace.predicted;
-    html += `<div class="logit-bar-wrap">`;
-    html += `<div class="logit-bar ${isWinner ? 'winner' : ''}" style="height:${h.toFixed(0)}px;background:${isWinner ? COLORS.good : COLORS.dim}"></div>`;
+    html += '<div class="logit-bar-wrap">';
+    html += `<div class="logit-bar ${isWinner ? 'winner' : ''}" style="height:${bh.toFixed(0)}px;background:${isWinner ? COLORS.good : COLORS.dim}"></div>`;
     html += `<div class="logit-label">${v}</div>`;
     html += '</div>';
   }
   html += '</div>';
-  html += `<div class="stage-info" style="margin-top:8px;"><strong style="color:${COLORS.good}">Predicted: ${trace.predicted}</strong> (probability: ${(trace.probs[trace.predicted] * 100).toFixed(1)}%)</div>`;
+
+  const expected = carries.results[step];
+  const isCorrect = trace.predicted === expected;
+  html += `<div class="stage-headline" style="margin-top:10px">`;
+  html += `<strong style="color:${COLORS.good}">Predicted: ${trace.predicted}</strong> with ${(trace.probs[trace.predicted] * 100).toFixed(1)}% confidence`;
+  html += ` &mdash; <span style="color:${isCorrect ? COLORS.good : COLORS.carry}">${isCorrect ? 'Correct' : 'Wrong (expected ' + expected + ')'}</span>`;
+  html += '</div>';
   html += '</div>';
 
-  container.innerHTML = html;
+  document.getElementById('fwdStages').innerHTML = html;
 
-  document.getElementById('fwdStepInfo').textContent = `Generating position ${trace.seqPos}, output = ${trace.predicted}`;
+  // ── D. Running carry chain ──
+  let chain = '<div style="font-size:0.78rem;color:#8b949e;margin-bottom:6px;text-align:center;">Carry chain</div>';
+  chain += '<div class="fwd-carry-chain">';
+  for (let i = 0; i < ANSWER_LEN; i++) {
+    chain += '<div class="fwd-carry-cell">';
+    if (i <= step) {
+      const co = carries.carryOut[i];
+      chain += `<div class="cc-digit ${co ? 'has-carry' : 'no-carry'}">${R.generated[i]}</div>`;
+      if (i < ANSWER_LEN - 1) {
+        chain += `<div class="cc-arrow" style="color:${co ? COLORS.carry : COLORS.good}">${co ? 'c=1&rarr;' : ''}</div>`;
+      }
+    } else {
+      chain += '<div class="cc-digit future">?</div>';
+    }
+    chain += `<div class="cc-label">Z${i}</div>`;
+    chain += '</div>';
+  }
+  chain += '</div>';
+  document.getElementById('fwdCarryChain').innerHTML = chain;
 }
 
 // ── Logits Visualization ────────────────────────────────────────────
@@ -1622,6 +2046,19 @@ function drawCarryChain() {
 
 document.addEventListener('DOMContentLoaded', () => {
   runCompute();
+
+  // Arrow key support for forward pass stepper
+  document.addEventListener('keydown', (e) => {
+    // Only respond if forward pass section is visible
+    const sec = document.getElementById('sec-forward');
+    if (!sec || !lastResult) return;
+    const rect = sec.getBoundingClientRect();
+    const visible = rect.top < window.innerHeight && rect.bottom > 0;
+    if (!visible) return;
+
+    if (e.key === 'ArrowLeft') { e.preventDefault(); fwdPrev(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); fwdNext(); }
+  });
 });
 </script>
 </body>
