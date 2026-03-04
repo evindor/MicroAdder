@@ -1,16 +1,17 @@
 # MicroAdder
 
-A **67-parameter** trained transformer that performs 10-digit addition with 100% accuracy. Built for the [AdderBoard](https://github.com/anadim/AdderBoard) challenge.
+A **57-parameter** trained transformer that performs 10-digit addition with 100% accuracy. Built for the [AdderBoard](https://github.com/anadim/AdderBoard) challenge.
 
 [Interactive model](https://evindor.github.io/MicroAdder/) | [Paper](https://evindor.github.io/MicroAdder/PAPER) (not a real scientific paper, its a weekend project)
 
 ## Result
 
-**67 parameters, 100% accuracy** (10,010/10,010). Trained from scratch — no warm-starting, no frozen pretrained values. Sinusoidal positional encoding (0 learned position parameters).
+**57 parameters, 100% accuracy** (10,010/10,010). Trained from scratch — no warm-starting, no frozen pretrained values. Sinusoidal positional encoding (0 learned position parameters).
 
 | Params | Accuracy | Seed | Key innovations | Training |
 |--------|----------|------|-----------------|----------|
-| **67** | **100%** | 71046 | sinusoidal pos, qk_dim=4 | carry_mix=0.8, step-fade, 60K steps |
+| **57** | **100%** | 777 | triple-duty head_proj (V/output/fc2 tied) | carry_mix=0.8, step-fade, 60K steps |
+| 67 | 100% | 71046 | sinusoidal pos, qk_dim=4 | carry_mix=0.8, step-fade, 60K steps |
 | 74 | 100% | 45214, 71046, 78988 | learned spiral, qk_dim=5 | carry_mix=0.8, step-fade, 120K steps |
 | 242 | 100% | (baseline) | — | JackCai's architecture |
 
@@ -21,7 +22,7 @@ Single-layer autoregressive decoder. 5-dimensional residual stream (2D token + 3
 ```
 d_model = 5 = tok_dim(2) + pos_dim(3)
 1 layer, 1 head, qk_dim = 4, head_dim = 5
-FFN dim = 2 (no bias, GELU)
+FFN dim = 2 (no bias, GELU, fc2 tied to head_proj)
 ```
 
 Every component is compressed:
@@ -34,10 +35,10 @@ Every component is compressed:
 | EQUALS position | 3 | Learned (PLUS/EOS frozen at zero) |
 | Q/K projection | 12+1 | Tied Q/K with phase rotation (3→4) |
 | Attention output | 10 | Rank-1 factorization: A(5×1) @ B(1×5) |
-| FFN | 20 | 5→2→5, no bias, GELU |
-| Output head | 10 | Also serves as V projection (tied V/O) |
+| FFN fc1 | 10 | 5→2, no bias, GELU |
+| Output head | 10 | **Triple-duty**: V projection + output classifier + FFN expansion (fc2) |
 | Normalization | 5 | Single RMSNorm weight shared across all 3 norms |
-| **Total** | **67** | |
+| **Total** | **57** | |
 
 ## Compression Path
 
@@ -52,20 +53,22 @@ Every component is compressed:
   ↓  tied A=B (circular embedding) + high carry-mix training
  74p  previous from-scratch frontier
   ↓  sinusoidal positions (freeze spiral) + qk_dim 5→4
- 67p  ← current from-scratch frontier
+ 67p  previous from-scratch frontier
+  ↓  triple-duty head_proj (tie fc2 = head_proj.T)
+ 57p  ← current from-scratch frontier
 ```
 
 ## Quick Start
 
 ```bash
 # Verify (100% accuracy, ~80s)
-uv run python ../AdderBoard/verify.py submission_67p/submission_67p.py
+uv run python ../AdderBoard/verify.py submission_57p/submission_57p.py
 
 # Train from scratch (~60K steps, ~5 min)
-uv run python -m microadder.train --run-name sub100_my_67p --seed 71046
+uv run python -m microadder.train --run-name sub100_my_57p --seed 777 --tie-fc2-head
 
 # Evaluate a checkpoint
-uv run python -m microadder.eval --checkpoint results/runs/sub100_my_67p/checkpoints/best.pt
+uv run python -m microadder.eval --checkpoint results/runs/sub100_my_57p/checkpoints/best.pt
 ```
 
 ## Key Training Innovation: High Carry-Mix
@@ -78,13 +81,14 @@ Long carry chains (9999999999 + 1) are exponentially rare in uniform sampling bu
 
 ```
 microadder/           Clean reimplementation (model + training)
-  model.py            67p/74p model definition
+  model.py            57p/67p/74p model definition
   train.py            Training loop
   data.py             Data generation
   eval.py             Evaluation
 
-submission_67p/       Current best submission (67p)
-submission_74p/       Previous best (74p)
+submission_57p/       Current best submission (57p)
+submission_67p/       Previous best (67p)
+submission_74p/       Older best (74p)
 
 src/                  Original research codebase (full feature set)
 
@@ -110,7 +114,7 @@ Made by Arseniy Zarechnev with help from Claude.
 ```bibtex
 @misc{zarechnev2026microadder,
   author       = {Arseniy Zarechnev and Claude},
-  title        = {67 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition},
+  title        = {57 Parameters Is All You Need: Training a Transformer for Perfect 10-Digit Addition},
   year         = {2026},
   url          = {https://github.com/evindor/MicroAdder},
 }

@@ -48,6 +48,25 @@ class ModelConfig:
     # instead of head_dim, decoupling attention routing from V/output.
     qk_dim: int = 0
 
+    # Norm: "weighted" = shared RMSNorm with learned weights (5p),
+    #       "parameterless" = x/rms(x) with no weights (0p),
+    #       "structured" = shared StructuredRMSNorm with 3 params (b, d1, d4),
+    #       "spiral" = frozen SpiralNorm derived from spiral params (0p)
+    norm_mode: str = "weighted"
+
+    # Q/K input: "pos" = position subspace only (default), "full" = full d_model
+    qk_input: str = "pos"
+
+    # Freeze tok_arc params: comma-separated, e.g. "A,start" to freeze those
+    freeze_tok_arc: str = ""
+    tok_arc_init_A: float = 2.5
+    tok_arc_init_start: float = -1.2
+    tok_arc_init_stride: float = 0.29
+
+    # Tie fc2 weights to head_proj (fc2 = head_proj.T). Saves 10p.
+    # head_proj does triple duty: V projection, output head, FFN expansion.
+    tie_fc2_head: bool = False
+
     # Frozen sinusoidal positions: comma-separated params to freeze.
     # e.g. "amp,phase,slope,offset" freezes all 4 spiral params (saves 4p).
     freeze_spiral: str = ""
@@ -55,6 +74,9 @@ class ModelConfig:
     spiral_init_phase: float = 0.0
     spiral_init_slope: float = 0.15
     spiral_init_offset: float = 0.0
+
+    # Freeze EQUALS position as spiral(equals_spiral_idx). -1 = learned (3p).
+    equals_spiral_idx: float = -1.0
 
     @property
     def effective_qk_dim(self) -> int:
@@ -81,6 +103,74 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return x / rms * self.weight
+
+
+class ParameterlessRMSNorm(nn.Module):
+    """RMSNorm without learnable weights (0 params). Just x / rms(x)."""
+
+    def __init__(self, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+
+class StructuredRMSNorm(nn.Module):
+    """RMSNorm with structured weights: w = [b, b+d1, b, b, b+d4].
+
+    3 learnable params instead of 5. Baseline b shared across dims,
+    with learned offsets on dims 1 and 4 (the two gate dimensions).
+    """
+
+    def __init__(self, d: int = 5, eps: float = 1e-5):
+        super().__init__()
+        self.b = nn.Parameter(torch.tensor(1.0))
+        self.d1 = nn.Parameter(torch.tensor(0.0))
+        self.d4 = nn.Parameter(torch.tensor(0.0))
+        self.eps = eps
+        self.d = d
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        w = self.b.expand(self.d).clone()
+        w[1] = self.b + self.d1
+        w[4] = self.b + self.d4
+        return x / rms * w
+
+
+class SpiralNorm(nn.Module):
+    """RMSNorm with frozen sinusoidal base + optional learned boost from reused param.
+
+    Base (frozen): w[d] = amp * sin(2*pi*d/10) + 1
+    Boost (0 extra params): pos dims get amp * z_hi_dir, where z_hi_dir is
+    the unit-direction of a reused position parameter (z_hi_pos).
+
+    This lets the model amplify whichever position dimension z_hi considers
+    important (typically the linear ramp), at zero extra parameter cost.
+    """
+
+    def __init__(self, amp: float, d: int = 5, tok_dim: int = 2,
+                 period: int = 10, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.amp = amp
+        self.tok_dim = tok_dim
+        w = torch.zeros(d)
+        for i in range(d):
+            w[i] = amp * math.sin(2.0 * math.pi * i / period) + 1.0
+        self.register_buffer("base_weight", w)
+        self._reuse_pos = None  # set externally to e.g. z_hi_pos
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        if self._reuse_pos is not None:
+            w = self.base_weight.clone()
+            z = self._reuse_pos.view(-1).abs()
+            boost = z / (z.sum() + 1.0) * self.amp
+            w[self.tok_dim:] = w[self.tok_dim:] + boost
+            return x / rms * w
+        return x / rms * self.base_weight
 
 
 # ── Rank-1 Linear ────────────────────────────────────────────────────────
@@ -120,6 +210,10 @@ class MicroAdder(nn.Module):
         norm_weight (shared, dim 5)     5
         TOTAL                          67
 
+    At 57p (tie_fc2_head=True, saves fc2's 10p):
+        Same as 67p but fc2 reuses head_proj.weight (triple-duty).
+        TOTAL                          57
+
     At 74p (qk_dim=5, learned spiral):
         + spiral (amp, phase, slope, off) 4
         + q_proj extra row                3
@@ -133,12 +227,20 @@ class MicroAdder(nn.Module):
         assert cfg.d_model == cfg.tok_dim + cfg.pos_dim
         self.cfg = cfg
 
-        # ── Parametric circular token embeddings (3 params) ──────────
+        # ── Parametric circular token embeddings (1-3 params) ─────────
         # emb[d] = [A*cos(start + d*stride), A*sin(start + d*stride)]
-        # A=B tied (circular arc)
-        self.tok_arc_A = nn.Parameter(torch.tensor(2.5))
-        self.tok_arc_start = nn.Parameter(torch.tensor(-1.2))
-        self.tok_arc_stride = nn.Parameter(torch.tensor(0.29))
+        frozen_tok = set(cfg.freeze_tok_arc.split(",")) if cfg.freeze_tok_arc else set()
+        tok_arc_params = {
+            "A": cfg.tok_arc_init_A,
+            "start": cfg.tok_arc_init_start,
+            "stride": cfg.tok_arc_init_stride,
+        }
+        for name, init_val in tok_arc_params.items():
+            t = torch.tensor(float(init_val))
+            if name in frozen_tok:
+                self.register_buffer(f"tok_arc_{name}", t)
+            else:
+                setattr(self, f"tok_arc_{name}", nn.Parameter(t))
 
         # ── Spiral positional encoding (0 or 4 params) ───────────────
         # pos[i] = [amp*cos(2*pi*i/10 + phase),
@@ -159,9 +261,20 @@ class MicroAdder(nn.Module):
                 setattr(self, f"spiral_{name}", nn.Parameter(t))
 
         # ── Special positions ────────────────────────────────────────
-        # PLUS (frozen zero), EQUALS (learned, 3 params), EOS (frozen zero)
+        # PLUS (frozen zero), EQUALS (learned or frozen sinusoidal), EOS (frozen zero)
         self.register_buffer("_plus_pos", torch.zeros(1, cfg.pos_dim))
-        self.special_pos_equals = nn.Parameter(torch.zeros(1, cfg.pos_dim))  # 3 params
+        if cfg.equals_spiral_idx >= 0:
+            # Freeze EQUALS as spiral evaluated at fractional index
+            idx = cfg.equals_spiral_idx
+            angle = 2.0 * math.pi * idx / float(MAX_DIGITS)
+            eq = torch.zeros(1, cfg.pos_dim)
+            eq[0, 0] = cfg.spiral_init_amp * math.cos(angle)
+            eq[0, 1] = cfg.spiral_init_amp * math.sin(angle)
+            if cfg.pos_dim > 2:
+                eq[0, 2] = cfg.spiral_init_slope * idx + cfg.spiral_init_offset
+            self.register_buffer("special_pos_equals", eq)
+        else:
+            self.special_pos_equals = nn.Parameter(torch.zeros(1, cfg.pos_dim))  # 3 params
         self.register_buffer("_eos_pos", torch.zeros(1, cfg.pos_dim))
 
         # Carry position (learned, 3 params)
@@ -178,9 +291,9 @@ class MicroAdder(nn.Module):
         )
 
         # ── Attention (tied Q/K with phase rotation) ─────────────────
-        # Q and K share the same projection: pos_dim -> qk_dim
         qk_dim = cfg.effective_qk_dim
-        self.q_proj = nn.Linear(cfg.pos_dim, qk_dim, bias=False)
+        qk_in = cfg.d_model if cfg.qk_input == "full" else cfg.pos_dim
+        self.q_proj = nn.Linear(qk_in, qk_dim, bias=False)
 
         # Learnable phase angle for Q (1 param) -- breaks Q/K symmetry
         self.q_phase_angle = nn.Parameter(torch.zeros(cfg.n_heads))  # 1 param
@@ -192,23 +305,47 @@ class MicroAdder(nn.Module):
         mask = torch.tril(torch.ones(cfg.max_seq_len, cfg.max_seq_len))
         self.register_buffer("causal_mask", mask.unsqueeze(0).unsqueeze(0))
 
-        # ── FFN (no bias, 10+10 = 20 params) ────────────────────────
+        # ── FFN (no bias) ─────────────────────────────────────────────
         self.fc1 = nn.Linear(cfg.d_model, cfg.ffn_dim, bias=False)  # 10 params
-        self.fc2 = nn.Linear(cfg.ffn_dim, cfg.d_model, bias=False)  # 10 params
+        if not cfg.tie_fc2_head:
+            self.fc2 = nn.Linear(cfg.ffn_dim, cfg.d_model, bias=False)  # 10 params
 
         # ── Output head (10 params, also serves as V projection) ─────
         self.head_proj = nn.Linear(cfg.d_model, cfg.tok_dim, bias=False)  # 10 params
 
-        # ── Shared RMSNorm (5 params) ────────────────────────────────
-        # Single weight vector shared across all 3 norm sites:
-        # pre-attention, pre-FFN, pre-output
-        self.norm1 = RMSNorm(cfg.d_model)
-        self.norm2 = RMSNorm(cfg.d_model)
-        self.norm_f = RMSNorm(cfg.d_model)
-        # Tie all norm weights to the same parameter
-        shared_weight = self.norm1.weight
-        self.norm2.weight = shared_weight
-        self.norm_f.weight = shared_weight
+        # ── Normalization ─────────────────────────────────────────────
+        if cfg.norm_mode == "parameterless":
+            # 0 params: just x / rms(x)
+            self.norm1 = ParameterlessRMSNorm()
+            self.norm2 = ParameterlessRMSNorm()
+            self.norm_f = ParameterlessRMSNorm()
+        elif cfg.norm_mode == "structured":
+            # 3 params: shared StructuredRMSNorm (b, d1, d4)
+            self.norm1 = StructuredRMSNorm(cfg.d_model)
+            self.norm2 = StructuredRMSNorm(cfg.d_model)
+            self.norm_f = StructuredRMSNorm(cfg.d_model)
+            # Share all 3 params across norm sites
+            self.norm2.b = self.norm1.b
+            self.norm2.d1 = self.norm1.d1
+            self.norm2.d4 = self.norm1.d4
+            self.norm_f.b = self.norm1.b
+            self.norm_f.d1 = self.norm1.d1
+            self.norm_f.d4 = self.norm1.d4
+        elif cfg.norm_mode == "spiral":
+            # 0 extra params: frozen sinusoidal base + z_hi_pos boost on pos dims
+            sn = SpiralNorm(cfg.spiral_init_amp, cfg.d_model, cfg.tok_dim)
+            sn._reuse_pos = self.z_hi_pos
+            self.norm1 = sn
+            self.norm2 = sn
+            self.norm_f = sn
+        else:
+            # 5 params: shared RMSNorm weight across all 3 norm sites
+            self.norm1 = RMSNorm(cfg.d_model)
+            self.norm2 = RMSNorm(cfg.d_model)
+            self.norm_f = RMSNorm(cfg.d_model)
+            shared_weight = self.norm1.weight
+            self.norm2.weight = shared_weight
+            self.norm_f.weight = shared_weight
 
         self._init_weights()
 
@@ -239,7 +376,8 @@ class MicroAdder(nn.Module):
                           device=idx.device, dtype=idx.dtype)
         pos[:, 0] = self.spiral_amp * torch.cos(angle)
         pos[:, 1] = self.spiral_amp * torch.sin(angle)
-        pos[:, 2] = self.spiral_slope * idx + self.spiral_offset
+        if self.cfg.pos_dim > 2:
+            pos[:, 2] = self.spiral_slope * idx + self.spiral_offset
         return pos
 
     def _get_positions(self, T: int) -> torch.Tensor:
@@ -294,7 +432,8 @@ class MicroAdder(nn.Module):
         """Initialize learnable parameters."""
         with torch.no_grad():
             nn.init.normal_(self.z_hi_pos, std=0.02)
-            nn.init.normal_(self.special_pos_equals, std=0.02)
+            if isinstance(self.special_pos_equals, nn.Parameter):
+                nn.init.normal_(self.special_pos_equals, std=0.02)
         # Xavier for all linear layers
         for module in self.modules():
             if isinstance(module, nn.Linear) and module.weight.dim() > 1:
@@ -326,12 +465,12 @@ class MicroAdder(nn.Module):
         # 2. Pre-attention norm
         h = self.norm1(x)
 
-        # 3. Attention: Q,K from pos subspace, V from tok subspace via tied head_proj
-        pos_h = h[:, :, self.cfg.tok_dim:]                              # (B, T, 3)
+        # 3. Attention: Q,K from pos or full subspace, V from tok subspace
         tok_h = h[:, :, :self.cfg.tok_dim]                              # (B, T, 2)
+        qk_in = h if self.cfg.qk_input == "full" else h[:, :, self.cfg.tok_dim:]
 
-        Q = self.q_proj(pos_h)                                          # (B, T, qk_dim)
-        K = self.q_proj(pos_h)                                          # (B, T, qk_dim) tied
+        Q = self.q_proj(qk_in)                                         # (B, T, qk_dim)
+        K = self.q_proj(qk_in)                                         # (B, T, qk_dim) tied
         # Tied V/O: V projection uses head_proj.weight as the (tok_dim->d_model) map.
         # head_proj.weight shape is (tok_dim, d_model) = (2, 5), so
         # V = tok_h @ weight = (B,T,2) @ (2,5) = (B,T,5).
@@ -355,7 +494,12 @@ class MicroAdder(nn.Module):
         x = x + self.out_proj(out)
 
         # 7. FFN with pre-norm (shared norm weights)
-        x = x + self.fc2(F.gelu(self.fc1(self.norm2(x))))
+        ffn_hidden = F.gelu(self.fc1(self.norm2(x)))
+        if self.cfg.tie_fc2_head:
+            # Triple-duty: head_proj.weight (2,5) used as fc2 expansion
+            x = x + ffn_hidden @ self.head_proj.weight
+        else:
+            x = x + self.fc2(ffn_hidden)
 
         # 8. Output logits: head_proj(norm(x)) @ tok_emb.T
         logits = self.head_proj(self.norm_f(x)) @ tok_emb_table.T      # (B, T, 10)

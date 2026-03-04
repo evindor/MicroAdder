@@ -1,0 +1,44 @@
+{
+  "model": {
+    "d_model": 5,
+    "tok_dim": 2,
+    "pos_dim": 3,
+    "n_heads": 1,
+    "head_dim": 5,
+    "qk_dim": 4,
+    "ffn_dim": 2,
+    "vocab_size": 10,
+    "max_seq_len": 34,
+    "norm_mode": "weighted",
+    "qk_input": "pos",
+    "tie_fc2_head": true,
+    "freeze_spiral": "amp,phase,slope,offset",
+    "spiral_init_amp": 3.5,
+    "spiral_init_phase": 0.0,
+    "spiral_init_slope": 0.15,
+    "spiral_init_offset": 0.0,
+    "equals_spiral_idx": -1.0
+  },
+  "training": {
+    "seed": 777,
+    "steps": 60000,
+    "batch_size": 256,
+    "lr": 0.02,
+    "min_lr_ratio": 0.1,
+    "warmup_steps": 1000,
+    "weight_decay": 0.01,
+    "wd_adaptive": false,
+    "grad_clip": 1.0,
+    "carry_mix": 0.8,
+    "carry_mix_fade_start": 15000,
+    "carry_mix_fade_end": 45000,
+    "curriculum": "1-3:2000,1-6:5000,1-10:rest"
+  },
+  "result": {
+    "params": 57,
+    "accuracy": "10010/10010 (100%)",
+    "grokked_step": 44000,
+    "seeds_tested": [777],
+    "seeds_grokked": [777]
+  }
+}

@@ -315,10 +315,28 @@ def parse_args():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 
     # Architecture
+    p.add_argument("--d-model", type=int, default=5)
+    p.add_argument("--tok-dim", type=int, default=2)
+    p.add_argument("--pos-dim", type=int, default=3)
+    p.add_argument("--head-dim", type=int, default=0, help="0=d_model")
     p.add_argument("--qk-dim", type=int, default=4,
                    help="Q/K projection dim (0=head_dim, 4=67p, 5=74p)")
+    p.add_argument("--qk-input", default="pos", choices=["pos", "full"],
+                   help="Q/K input: 'pos' (position subspace) or 'full' (full d_model)")
+    p.add_argument("--norm-mode", default="weighted",
+                   choices=["weighted", "parameterless", "structured", "spiral"],
+                   help="Norm: 'weighted' (5p), 'structured' (3p), 'spiral' (0p), or 'parameterless' (0p)")
+    p.add_argument("--tie-fc2-head", action="store_true", default=False,
+                   help="Tie fc2 to head_proj.T (triple-duty, saves 10p)")
+    p.add_argument("--freeze-tok-arc", default="",
+                   help="Tok arc params to freeze, e.g. 'A,start' (saves 2p)")
+    p.add_argument("--tok-arc-init-A", type=float, default=2.5)
+    p.add_argument("--tok-arc-init-start", type=float, default=-1.2)
+    p.add_argument("--tok-arc-init-stride", type=float, default=0.29)
     p.add_argument("--freeze-spiral", default="amp,phase,slope,offset",
                    help="Spiral params to freeze (empty=learn all, 'amp,phase,slope,offset'=sinusoidal)")
+    p.add_argument("--equals-spiral-idx", type=float, default=-1.0,
+                   help="Freeze EQUALS pos as spiral(idx). -1=learned (3p), 9.5=frozen sinusoidal (0p)")
     p.add_argument("--spiral-init-amp", type=float, default=3.5)
     p.add_argument("--spiral-init-phase", type=float, default=0.0)
     p.add_argument("--spiral-init-slope", type=float, default=0.15)
@@ -376,7 +394,19 @@ def main():
 
     # Model
     cfg = ModelConfig(
+        d_model=args.d_model,
+        tok_dim=args.tok_dim,
+        pos_dim=args.pos_dim,
+        head_dim=args.head_dim if args.head_dim > 0 else args.d_model,
         qk_dim=args.qk_dim,
+        qk_input=args.qk_input,
+        norm_mode=args.norm_mode,
+        tie_fc2_head=args.tie_fc2_head,
+        freeze_tok_arc=args.freeze_tok_arc,
+        tok_arc_init_A=args.tok_arc_init_A,
+        tok_arc_init_start=args.tok_arc_init_start,
+        tok_arc_init_stride=args.tok_arc_init_stride,
+        equals_spiral_idx=args.equals_spiral_idx,
         freeze_spiral=args.freeze_spiral,
         spiral_init_amp=args.spiral_init_amp,
         spiral_init_phase=args.spiral_init_phase,

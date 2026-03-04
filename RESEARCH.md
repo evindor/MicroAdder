@@ -25,22 +25,46 @@ In short: if you can swap in a different set of weights and use the exact same i
 - Fixed/sinusoidal positional encodings are not counted (following the original Transformer paper convention)
 - Learned positional encodings are counted
 
-## Current Best: 74 Parameters, 100% Accuracy (From Scratch)
+## Current Best: 57 Parameters, 100% Accuracy (From Scratch)
 
-A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture. Trained from scratch with no warm-starting or frozen pretrained values. **3/3 random seeds converge** with high carry-mix training.
+A 1-layer autoregressive decoder that performs 10-digit addition with 100% accuracy (10010/10010 on AdderBoard). Built by progressively compressing JackCai's 242p split-subspace architecture. Trained from scratch with no warm-starting or frozen pretrained values.
 
 ```
 d_model = 5 = tok_dim(2) + pos_dim(3)
-1 layer, 1 head, head_dim = 5
+1 layer, 1 head, head_dim = 5, qk_dim = 4
 FFN dim = 2 (no bias, GELU), shared RMSNorm (all 3 norms share one weight)
 Tied Q/K + q-phase rotation (1 param), rank-1 out_proj
-Tied V/output (v_proj = head_proj.T, saves 10p)
+Triple-duty head_proj (v_proj = head_proj.T, fc2 = head_proj, output head)
 Parametric tok_emb (3 arc params: A=B tied, start, stride — circular embedding)
-Spiral positions (4 params: amp, phase, slope, offset), no correction
+Sinusoidal positions (frozen: amp=3.5, phase=0, slope=0.15, offset=0)
 PLUS/EOS frozen to zero, EQUALS learned (3p), z_hi carry learned (3p)
 ```
 
-### Parameter Budget (74p)
+### Parameter Budget (57p)
+
+```
+tok_arc_A (=B)     1  (circular arc amplitude)
+tok_arc_start      1
+tok_arc_stride     1
+z_hi_pos           3  (carry position)
+special_pos_equals 3  (EQUALS position)
+q_phase_angle      1
+q_proj            12  (3 -> 4, shared with K)
+out_proj          10  (5x1 + 1x5, rank-1)
+FFN fc1           10  (5 -> 2, no bias)
+head_proj         10  (5 -> 2, triple-duty: V/output/fc2)
+RMSNorm (shared)   5  (one weight vector)
+─────────────────────
+TOTAL             57
+
+Free: sinusoidal positions (4 frozen), PLUS/EOS positions (6 frozen), fc2 (tied to head_proj)
+```
+
+### Previous Best: 67p (sinusoidal positions + qk_dim=4)
+
+Same as 57p but with independent fc2 (10 extra params). Known good seed: 71046.
+
+### Previous Best: 74 Parameters (learned spiral + qk_dim=5)
 
 ```
 tok_arc_A (=B)     1  (circular arc amplitude)
@@ -94,6 +118,16 @@ head_proj         12  (6 -> 2)
 ─────────────────────
 TOTAL            170
 ```
+
+### Training Recipe (57p — triple-duty head_proj)
+
+- AdamW (lr=0.02), cosine decay, **60K step budget**
+- Constant weight decay 0.01 (no adaptive WD needed)
+- **Carry-mix 0.8, step-based fade**: `--carry-mix 0.8 --carry-mix-fade-start 15000 --carry-mix-fade-end 45000`
+- Digit curriculum: 1-3 digits for 2K steps, 1-6 for 5K, then full 1-10
+- `--tie-fc2-head` to enable triple-duty weight sharing
+- Known good seed: 777 (grokked at step 44K)
+- Train: `uv run python -m microadder.train --run-name sub100_57p --seed 777 --tie-fc2-head`
 
 ### Training Recipe (74p — high carry-mix with step-based fade)
 
@@ -161,21 +195,16 @@ These models all train from random initialization with no warm-starting. Every p
  74p  Tie tok_arc A=B (-1p)
  |    Circular embedding (trained A/B ratio was 1.005)
  |    High carry-mix training: 3/3 random seeds grok
- |    THIS IS THE CURRENT FROM-SCRATCH FRONTIER (100% accuracy)
  |
- 72p  Freeze spiral slope+amp (-2p)
- |    slope converged to -0.058 (≈0), amp to 1.005 (≈1)
- |    Near-grok: s70472 72.7%, s80085 70.9% exact (NOT 100%)
+ 67p  Sinusoidal positions + qk_dim 5→4 (-7p)
+ |    Freeze all 4 spiral params → free sinusoidal encoding (saves 4p)
+ |    Q/K projection 5→4 (dead 5th row removed, saves 3p)
+ |    Known good seed: 71046
  |
- 70p  Freeze ALL spiral params — sinusoidal positions (-4p from 74p)
-      Digit pos = [cos(2πi/10), sin(2πi/10), 0] — FREE by competition rules
-      Near-grok: s90494 73.5% exact, 97.5% tok_acc (NOT 100%)
-      Plateau at ~72% for 100K+ steps — carry circuit partially works
-
- Frontier target (in progress):
- 62p  Toeplitz q_proj + sinusoidal positions (-12p from 74p)
-      q_proj: 15p → 7p (constrained to constant diagonals)
-      Running experiments, results pending
+ 57p  Triple-duty head_proj: tie fc2 = head_proj.T (-10p)
+      head_proj does V projection, output classification, AND FFN expansion
+      Known good seed: 777, grokked at step 44K
+      THIS IS THE CURRENT FROM-SCRATCH FRONTIER (100% accuracy)
 ```
 
 ### Warm-Start Exploration: 75p → 62p (Historical — Abandoned Approach)
@@ -222,7 +251,8 @@ These models all train from random initialization with no warm-starting. Every p
 | High carry-mix (0.8) + step-based fade | 74p | 100%, 3/3 seeds | Carry-heavy training + smooth fade dramatically improves grok rate |
 | Freeze spiral slope+amp (72p) | 72p | 72.7% best (near-grok) | slope≈0, amp≈1 already; freezing doesn't break learning but makes full grok harder |
 | Sinusoidal positions (70p) | 70p | 73.5% best (near-grok) | ALL spiral frozen = free sinusoidal encoding. Model finds carry circuit but can't fully stabilize |
-| Toeplitz q_proj (implemented) | 62p | Running | Constant-diagonal constraint: 15p → 7p. Equivalent to 1D convolution over position dims |
+| Sinusoidal pos + qk_dim=4 (67p) | 67p | 100%, seed 71046 | Frozen sinusoidal (saves 4p) + dead Q/K row removed (saves 3p) |
+| **Triple-duty head_proj (57p)** | **57p** | **100%, seed 777** | **fc2 tied to head_proj.T — head does V proj, output, AND FFN expansion. Saves 10p.** |
 
 ### What Failed
 
@@ -251,6 +281,11 @@ These models all train from random initialization with no warm-starting. Every p
 | WD warmup (zero→ramp) | 72p | 28% tok_acc | Model overfits during WD=0 phase, collapses when WD ramps in |
 | d_model=4, tok_dim=2, pos_dim=2 (56p) | 56p | 22-54% tok_acc | pos_dim=2 can't represent carry dimension (z_hi needs dim3) |
 | d_model=4, tok_dim=1, pos_dim=3 (58p) | 58p | Dead | **tok_dim=1 is mathematically impossible for 10-class output**: logits = scalar × [emb_0..emb_9], argmax depends only on sign → max 2 classes |
+| d_model=4, full Q/K input (60p) | 60p | <0.3 tok_acc | Content-dependent attention (mixing tok into Q/K) completely fails; positional routing breaks |
+| Spiral norm (0p frozen norm) | 62p | 59.9% exact | Norm dim4 mismatch; can't match the asymmetric gating 67p's learned norm provides |
+| Frozen tok_arc (bad inits) | 65p | <0.3 tok_acc | A=1.0, start=0.0 too far from learned A≈6, start≈-0.5; model can't bootstrap |
+| qk_dim=2 | 61p | 73.7% plateau | Single rotation plane can't route A8→Zhi for carry; structural limit |
+| qk_dim=3 | 64p | 74.4% plateau | Still 1 rotation plane (1 pair + 1 orphan dim); same carry routing failure |
 | Scaffold L1 + prune (8 experiments) | various | All failed | L1 penalty is adversarial to task learning at small scale |
 
 ### Hard Constraints (Updated — Some Overturned)
@@ -277,6 +312,8 @@ These models all train from random initialization with no warm-starting. Every p
 | d_model=4 is fundamentally dead | **New finding** | tok_dim=1: can't classify 10 digits (rank-1 logits). tok_dim=2: pos_dim=2 can't represent carry |
 | tok_dim ≥ 2 is mandatory | **New finding** | tok_dim=1 → logits = scalar × embedding_vector → argmax is binary → max 2 classes. Mathematical impossibility. |
 | Near-grok plateau exists at 70-72p | **New finding** | Models reach 72-73% exact / 97.5% tok_acc and oscillate indefinitely. Different from 74p's binary grok/fail. |
+| qk_dim≥4 required for grokking | **New finding** | qk_dim=2,3 both plateau at ~73-74% exact. Need 2 rotation planes in Q/K for carry routing (A8→Zhi). |
+| Triple-duty head_proj works | **New finding** | Tying fc2=head_proj.T saves 10p (67→57). Model discovers autoregressive carry propagation instead of carry-lookahead. |
 | Grokking seeds are config-specific | **New finding** | 10-seed sweep: seeds that grok 75p fail 72p and vice versa. freeze_z_hi changes loss landscape topology, not just difficulty. |
 | "Flash grokking" occurs at small sizes | **New finding** | 75p s78779 hit 95.8% exact then crashed. Grokking basin is dynamically unstable for most seeds. |
 | Grok rate ~10-20% for random seeds | **New finding** | 10-seed sweep: ~2-4/10 seeds show grokking signals, ~1/10 approach 100%. Only s80085 works for both 75p and 72p. |
@@ -295,7 +332,7 @@ These models all train from random initialization with no warm-starting. Every p
 
 ## Hand-Coded Models: What They Teach Us
 
-Three hand-coded addition transformers (36p, 40p, 87p) prove the representational floor is far below our 75p. The 75/40 = **~1.9x overhead** is not about capacity — it's about what SGD can discover from scratch.
+Three hand-coded addition transformers (36p, 40p, 87p) prove the representational floor is far below our 57p. The 57/40 = **~1.4x overhead** is not about capacity — it's about what SGD can discover from scratch.
 
 ### The Models
 
@@ -321,25 +358,25 @@ Three hand-coded addition transformers (36p, 40p, 87p) prove the representationa
 
 ### The Discoverability Gap
 
-| Component | 75p (from scratch) | 170p (prev) | param_40 (40p) |
-|---|---|---|---|
-| tok_emb | 4p (arc params) | 28p (14x2) | 0p (frozen) |
-| positions | 12p (spiral+z_hi+eq) | 14p (spiral+corr) | 0p (RoPE) |
-| Q/K projections | 16p (q_proj+phase) | 26p (tied+phase) | ~5p |
-| V projection | 0p (tied V/O) | 12p | ~4p (tied V/O) |
-| out_proj | 10p (rank-1) | 24p (rank-2) | 0p (tied V/O) |
-| RMSNorm | 5p (shared) | 18p (3 x 6) | 0p (parameterless) |
-| FFN | 20p (no bias) | 32p | ~8p |
-| head_proj | 10p | 12p | 0p (tied embed) |
-| **Total** | **75p** | **170p** | **~17p** |
+| Component | 57p (from scratch) | 75p (prev) | 170p (prev) | param_40 (40p) |
+|---|---|---|---|---|
+| tok_emb | 3p (arc params) | 4p (arc) | 28p (14x2) | 0p (frozen) |
+| positions | 6p (z_hi+eq) | 12p (spiral+z_hi+eq) | 14p (spiral+corr) | 0p (RoPE) |
+| Q/K projections | 13p (q_proj+phase) | 16p (q_proj+phase) | 26p (tied+phase) | ~5p |
+| V projection | 0p (tied triple-duty) | 0p (tied V/O) | 12p | ~4p (tied V/O) |
+| out_proj | 10p (rank-1) | 10p (rank-1) | 24p (rank-2) | 0p (tied V/O) |
+| RMSNorm | 5p (shared) | 5p (shared) | 18p (3 x 6) | 0p (parameterless) |
+| FFN | 10p (fc1 only, fc2 tied) | 20p (no bias) | 32p | ~8p |
+| head_proj | 10p (triple-duty) | 10p | 12p | 0p (tied embed) |
+| **Total** | **57p** | **75p** | **170p** | **~17p** |
 
-The discoverability gap has shrunk from 170/40 = **4.25x** to 75/40 = **1.88x** (from scratch). The warm-start cascade can push to 62p (1.55x), but that relies on frozen pretrained values. The real SGD-discoverable frontier is 75p.
+The discoverability gap has shrunk from 170/40 = **4.25x** to 57/40 = **1.43x** (from scratch). Each compression step requires discovering new weight-sharing opportunities that SGD can exploit.
 
 ---
 
-## The Sub-74 Goal
+## The Sub-57 Goal
 
-The from-scratch SOTA is 74p (3/3 seeds grok). Strong near-grok signals at 70p (73.5% exact) confirm the architecture can *almost* solve the task with fewer params. The target: **push the from-scratch frontier to full 100% accuracy below 74 parameters**.
+The from-scratch SOTA is 57p (seed 777, grokked step 44K). The target: **push the from-scratch frontier to full 100% accuracy below 57 parameters**.
 
 ### The Near-Grok Plateau: A New Phenomenon
 
